@@ -55,7 +55,11 @@ A fully fine-tuned / merged checkpoint is just `--model path/to/checkpoint`.
 
 Outputs go to <output-dir>/<variant>_<split>_<mode>.jsonl (+ _summary.json) per variant and
 a comparison.json across variants. Predictions are written incrementally, so an interrupted
-run resumes where it left off when re-launched with the same arguments.
+run resumes where it left off when re-launched with the same arguments; pass --rerun to
+discard existing predictions and regenerate everything.
+
+Generation length is only bounded by the model's context window (262k tokens for Qwen3.5)
+unless --max-new-tokens is given.
 """
 
 import argparse
@@ -85,7 +89,9 @@ def parse_args():
     p.add_argument("--limit", type=int, default=None, help="Evaluate only the first N items.")
     p.add_argument("--thinking", action="store_true", help="Enable Qwen3.5 thinking mode (off by default).")
     p.add_argument("--max-new-tokens", type=int, default=None,
-                   help="Default: 1024 without thinking, 8192 with thinking.")
+                   help="Default: no limit beyond the model's context window.")
+    p.add_argument("--rerun", action="store_true",
+                   help="Ignore existing predictions and regenerate all questions (overwrites results).")
     p.add_argument("--backend", choices=["auto", "vllm", "hf"], default="auto")
     p.add_argument("--output-dir", type=Path, default=Path("results"))
     p.add_argument("--chunk-size", type=int, default=2048,
@@ -94,7 +100,7 @@ def parse_args():
     g.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     g.add_argument("--tensor-parallel-size", type=int, default=1)
     g.add_argument("--max-model-len", type=int, default=None,
-                   help="Default: max-new-tokens + 4096 (largest images are ~1.3k tokens).")
+                   help="Default: the model's full context, or the largest that fits in GPU memory.")
     g = p.add_argument_group("hf")
     g.add_argument("--batch-size", type=int, default=16)
     g.add_argument("--device", default=None, help="cuda / mps / cpu (auto-detected by default).")
@@ -260,7 +266,7 @@ class VLLMBackend:
         self.llm = LLM(
             model=args.model,
             dtype="bfloat16",
-            max_model_len=args.max_model_len or max_new_tokens + 4096,
+            max_model_len=args.max_model_len or -1,  # -1: full context if it fits, else largest that does
             gpu_memory_utilization=args.gpu_memory_utilization,
             tensor_parallel_size=args.tensor_parallel_size,
             limit_mm_per_prompt={"image": 1},
@@ -271,6 +277,7 @@ class VLLMBackend:
             **lora_kwargs,
         )
         # Greedy decoding, matching the lmms-eval config for this benchmark.
+        # max_tokens=None generates until EOS or the context limit.
         self.sampling = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
         self.chat_kwargs = {"enable_thinking": args.thinking}
         self.adapters = adapters
@@ -335,6 +342,7 @@ class HFBackend:
             self.model.load_adapter(str(path), adapter_name=name)
         self.has_adapters = bool(adapters)
         self.max_new_tokens = max_new_tokens
+        self.context_len = self.model.config.get_text_config().max_position_embeddings
         self.thinking = args.thinking
         self.batch_size = args.batch_size
 
@@ -369,13 +377,14 @@ class HFBackend:
                 processor_kwargs={"padding": True},
                 enable_thinking=self.thinking,
             ).to(self.model.device)
+            limit = self.max_new_tokens or self.context_len - inputs["input_ids"].shape[1]
             with torch.inference_mode():
-                out = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens,
+                out = self.model.generate(**inputs, max_new_tokens=limit,
                                           do_sample=False, temperature=None, top_p=None, top_k=None)
             gen = out[:, inputs["input_ids"].shape[1]:]
             for i, row in zip(idx, gen):
                 # Finished rows end in EOS/padding; a row that hit the token limit ends mid-text.
-                truncated = len(row) >= self.max_new_tokens and row[-1].item() not in stop_ids
+                truncated = len(row) >= limit and row[-1].item() not in stop_ids
                 results[i] = (self.processor.decode(row, skip_special_tokens=True).strip(), truncated)
         return results
 
@@ -402,7 +411,7 @@ def load_done(path):
 
 def main():
     args = parse_args()
-    max_new_tokens = args.max_new_tokens or (8192 if args.thinking else 1024)
+    max_new_tokens = args.max_new_tokens  # None = up to the context limit
     adapters = find_adapters(args.adapters)
     variants = ([] if args.skip_base else [None]) + list(adapters)
     if not variants:
@@ -420,7 +429,7 @@ def main():
     # Build names by string concat: Path.with_suffix would treat ".5-4B..." in "Qwen3.5-4B" as a suffix.
     stems = {v: f"{base_name if v is None else base_name + '+' + v}_{args.split}_{mode}" for v in variants}
     pred_paths = {v: args.output_dir / f"{stems[v]}.jsonl" for v in variants}
-    done = {v: load_done(pred_paths[v]) for v in variants}
+    done = {v: {} if args.rerun else load_done(pred_paths[v]) for v in variants}
 
     if any(len(done[v]) < len(ids) for v in variants):
         backend_name = pick_backend(args.backend)
@@ -432,7 +441,7 @@ def main():
         # One job per (item, variant), item-major so each chunk covers all variants and each
         # image is decoded once per chunk; vLLM batches the different LoRAs together.
         jobs = [(i, v) for i, id_ in enumerate(ids) for v in variants if id_ not in done[v]]
-        files = {v: pred_paths[v].open("a") for v in variants}
+        files = {v: pred_paths[v].open("w" if args.rerun else "a") for v in variants}
         with tqdm(total=len(jobs), desc="generating") as bar:
             for start in range(0, len(jobs), args.chunk_size):
                 chunk = jobs[start:start + args.chunk_size]
