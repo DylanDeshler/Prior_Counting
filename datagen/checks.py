@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
+from tqdm import tqdm
 
 from .common import DATA, IMG, MIN_UNIT_PX, REPORTS, png_bytes, read_jsonl, rle_decode
 from .families import E1_FAMILIES, HELD_OUT
@@ -45,10 +46,9 @@ class Report:
 
 def load_pools(pools=POOLS):
     out = {}
-    for p in pools:
-        f = DATA / p / "records.jsonl"
-        if f.exists():
-            out[p] = read_jsonl(f)
+    for p in tqdm([p for p in pools if (DATA / p / "records.jsonl").exists()], desc="loading records", unit="pool",
+                  leave=False):
+        out[p] = read_jsonl(DATA / p / "records.jsonl")
     return out
 
 
@@ -68,7 +68,7 @@ def check_records(rep, pools):
     bad = Counter()
     examples = defaultdict(list)
     for pool, recs in pools.items():
-        for r in recs:
+        for r in tqdm(recs, desc=f"records {pool}", unit="rec", leave=False):
             problems = []
             if r["unit_size_px"] is not None and r["points"] and r["prior"] == "count":
                 if r["unit_size_px"] < MIN_UNIT_PX:
@@ -93,8 +93,8 @@ def check_records(rep, pools):
 
 def check_points_in_masks(rep, pools, tol_px=0):
     bad, total = [], 0
-    for recs in pools.values():
-        for r in recs:
+    for pool, recs in pools.items():
+        for r in tqdm(recs, desc=f"points in masks {pool}", unit="rec", leave=False):
             if r["prior"] != "count":
                 continue
             for (x, y), m in zip(r["points"], r["masks_rle"]):
@@ -113,7 +113,7 @@ def check_determinism(rep, pools, n=100, seed=0):
     rng = np.random.default_rng(seed)
     sample = [recs[i] for i in rng.choice(len(recs), size=min(n, len(recs)), replace=False)]
     bad = []
-    for r in sample:
+    for r in tqdm(sample, desc="determinism (re-render)", unit="img", leave=False):
         h = hashlib.sha256(png_bytes(render_record(r))).hexdigest()
         on_disk = hashlib.sha256((DATA / r["image"]).read_bytes()).hexdigest()
         if not (h == r["image_sha256"] == on_disk):
@@ -127,7 +127,7 @@ def check_pair_integrity(rep, pools, max_pairs_per_pool=300):
     for pool, recs in pools.items():
         pairs = [v for v in pairs_of(recs).values() if len(v) == 2]
         step = max(1, len(pairs) // max_pairs_per_pool)
-        for a, b in pairs[::step]:
+        for a, b in tqdm(pairs[::step], desc=f"pair integrity {pool}", unit="pair", leave=False):
             n += 1
             if a["compression"] != b["compression"]:
                 bad.append((a["pair_id"], "compression differs"))
@@ -238,7 +238,7 @@ def check_exports(rep):
     from answer_parsing import extract_answer, matches
     by_id = {r["id"]: r for recs in load_pools().values() for r in recs}
     problems, n = [], 0
-    for path in sorted((DATA / "exports").glob("*/*/*/train.jsonl")):
+    for path in tqdm(sorted((DATA / "exports").glob("*/*/*/train.jsonl")), desc="exports parse", unit="file", leave=False):
         fmt = path.parent.name
         for line in path.open():
             row = json.loads(line)
@@ -290,7 +290,7 @@ def audit_sheets(per_generator=50, tile=224, cols=10):
     for recs in load_pools().values():
         for r in recs:
             by_gen[r["render"]["generator"]].append(r)
-    for gen, recs in sorted(by_gen.items()):
+    for gen, recs in tqdm(sorted(by_gen.items()), desc="audit contact sheets", unit="sheet"):
         rng = np.random.default_rng(0)
         pick = [recs[i] for i in sorted(rng.choice(len(recs), size=min(per_generator, len(recs)), replace=False))]
         rows = (len(pick) + cols - 1) // cols

@@ -37,11 +37,20 @@ def fetch_openimages_backgrounds(n=N_BACKGROUNDS):
 
     # Stream the 2.3 GB train box file once; keep only image-id sets.
     all_ids, bad_ids = set(), set()
-    with requests.get(OI_TRAIN_BOXES, stream=True, timeout=60) as r:
+    with requests.get(OI_TRAIN_BOXES, stream=True, timeout=60) as r, \
+            tqdm(total=int(r.headers.get("content-length", 0)) or None, unit="B", unit_scale=True,
+                 desc="Open Images train boxes (stream)") as bar:
         r.raise_for_status()
         r.raw.decode_content = True
-        for chunk in tqdm(pd.read_csv(r.raw, usecols=["ImageID", "LabelName"], chunksize=2_000_000),
-                          desc="Open Images train boxes"):
+        raw_read = r.raw.read
+
+        def read(*a, **k):  # count bytes as pandas pulls them
+            data = raw_read(*a, **k)
+            bar.update(len(data))
+            return data
+
+        r.raw.read = read
+        for chunk in pd.read_csv(r.raw, usecols=["ImageID", "LabelName"], chunksize=2_000_000):
             all_ids.update(chunk["ImageID"])
             bad_ids.update(chunk.loc[chunk["LabelName"].isin(excluded_mids), "ImageID"])
     pool = sorted(all_ids - bad_ids)

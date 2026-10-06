@@ -37,7 +37,8 @@ def galleries():
         if r["role"] in ("canonical", "original", "neutral"):  # one entry per pair; partner shown beside it
             by_gen[r["render"]["generator"]].append(r)
     pages = []
-    for gen, recs in sorted(by_gen.items()):
+    from tqdm import tqdm
+    for gen, recs in tqdm(sorted(by_gen.items()), desc="galleries", unit="page"):
         rng = np.random.default_rng(0)
         pick = [recs[i] for i in sorted(rng.choice(len(recs), size=min(PER_GENERATOR, len(recs)), replace=False))]
         rows = []

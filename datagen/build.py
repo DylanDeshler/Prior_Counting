@@ -45,7 +45,8 @@ def run_jobs(jobs, out_dir, step):
     t = time.time()
     records, retries = [], Counter()
     with ProcessPoolExecutor(workers()) as ex:
-        for recs, attempts, _ in tqdm(ex.map(run_job, jobs, chunksize=8), total=len(jobs), desc=step):
+        for recs, attempts, _ in tqdm(ex.map(run_job, jobs, chunksize=8), total=len(jobs), desc=step,
+                                      unit="item", smoothing=0.05):
             records += recs
             retries[recs[0]["render"]["generator"]] += attempts
     records.sort(key=lambda r: (r["dataset"], r["pool_index"], r["id"]))

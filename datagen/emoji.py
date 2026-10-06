@@ -70,8 +70,10 @@ def fetch_assets(cps_list):
         path.write_bytes(r.content)
         return cps
 
+    from tqdm import tqdm
+    todo = sorted(set(cps_list))
     with ThreadPoolExecutor(16) as ex:
-        return {c for c in ex.map(get, sorted(set(cps_list))) if c}
+        return {c for c in tqdm(ex.map(get, todo), total=len(todo), desc="Noto Emoji assets", unit="img") if c}
 
 
 @lru_cache(maxsize=512)

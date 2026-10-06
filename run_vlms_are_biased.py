@@ -60,6 +60,15 @@ discard existing predictions and regenerate everything.
 
 Generation length is only bounded by the model's context window (262k tokens for Qwen3.5)
 unless --max-new-tokens is given.
+
+Generated data (datagen): pass --records with a data directory (every pool under it), pool
+directories, or records.jsonl files. Ground truth is each record's answer and the "bias" answer
+is its familiar answer; bias ratio is computed over counterfactuals (where the familiar answer is wrong).
+Results are grouped by pool and by pool · family · role, so canonical vs counterfactual
+accuracy shows up per family. With --records, --limit takes the first N items of each pool.
+
+    uv run run_vlms_are_biased.py --records data/preview              # every preview pool
+    uv run run_vlms_are_biased.py --records data/e1/conflict data/tests/T0/count --limit 400
 """
 
 import argparse
@@ -87,6 +96,8 @@ def parse_args():
                    help="PEFT adapter dirs, or parent dirs searched recursively for adapter_config.json.")
     p.add_argument("--skip-base", action="store_true", help="Only evaluate the adapters.")
     p.add_argument("--split", default="main", choices=SPLITS)
+    p.add_argument("--records", nargs="*", type=Path, default=None,
+                   help="Evaluate generated data instead of VLMBias: data dir, pool dirs, or records.jsonl files.")
     p.add_argument("--limit", type=int, default=None, help="Evaluate only the first N items.")
     p.add_argument("--thinking", action="store_true", help="Enable Qwen3.5 thinking mode (off by default).")
     p.add_argument("--max-new-tokens", type=int, default=None,
@@ -121,10 +132,12 @@ def summarize(records):
 
     def stats(rs):
         n = len(rs)
+        with_bias = [r for r in rs if r["expected_bias"] not in (None, "")]
         return {
             "n": n,
             "accuracy": sum(r["correct"] for r in rs) / n,
-            "bias_ratio": sum(r["bias_aligned"] for r in rs) / n,
+            # Over items that have a prior answer (all of VLMBias; conflict pairs in generated data).
+            "bias_ratio": sum(r["bias_aligned"] for r in with_bias) / len(with_bias) if with_bias else None,
             "unparsed": sum(r["pred"] == "" for r in rs) / n,
             "truncated": sum(r.get("truncated", False) for r in rs) / n,
         }
@@ -138,11 +151,12 @@ def summarize(records):
 
 def print_summary(name, summary):
     def row(label, s):
-        print(f"{label:<40} {s['n']:>6} {100 * s['accuracy']:>8.2f} {100 * s['bias_ratio']:>8.2f} "
+        bias = f"{100 * s['bias_ratio']:>8.2f}" if s["bias_ratio"] is not None else f"{'-':>8}"
+        print(f"{label:<52} {s['n']:>6} {100 * s['accuracy']:>8.2f} {bias} "
               f"{100 * s['unparsed']:>8.2f} {100 * s['truncated']:>8.2f}")
 
     print(f"\n=== {name}")
-    print(f"{'':<40} {'n':>6} {'acc%':>8} {'bias%':>8} {'unpars%':>8} {'trunc%':>8}")
+    print(f"{'':<52} {'n':>6} {'acc%':>8} {'bias%':>8} {'unpars%':>8} {'trunc%':>8}")
     row("OVERALL", summary["overall"])
     print("-- by topic")
     for k, s in summary["by_topic"].items():
@@ -157,11 +171,14 @@ def print_comparison(summaries):
     width = max(len(n) for n in summaries) + 2
     print(f"\n=== Comparison (accuracy % / bias ratio %)")
     print(f"{'variant':<{width}} {'overall':>13} " + " ".join(f"{t[:18]:>18}" for t in topics))
+    def cell(st):
+        if not st:
+            return "-"
+        bias = f"{100 * st['bias_ratio']:5.1f}" if st["bias_ratio"] is not None else "  -  "
+        return f"{100 * st['accuracy']:5.1f} / {bias}"
+
     for name, s in summaries.items():
-        cells = [f"{100 * s['overall']['accuracy']:5.1f} / {100 * s['overall']['bias_ratio']:5.1f}"]
-        for t in topics:
-            ts = s["by_topic"].get(t)
-            cells.append(f"{100 * ts['accuracy']:5.1f} / {100 * ts['bias_ratio']:5.1f}" if ts else "-")
+        cells = [cell(s["overall"])] + [cell(s["by_topic"].get(t)) for t in topics]
         print(f"{name:<{width}} {cells[0]:>13} " + " ".join(f"{c:>18}" for c in cells[1:]))
 
 
@@ -380,6 +397,43 @@ def pick_backend(name):
 # Main
 # ---------------------------------------------------------------------------
 
+def load_generated(paths, limit):
+    """Generated-data records -> a dataset with the same columns as VLMBias."""
+    from datasets import Dataset, Image
+    files = []
+    for p in paths:
+        if p.is_file():
+            files.append(p)
+        else:
+            # A data dir holds many pools; skip nested previews/exports unless pointed at directly.
+            files += sorted(f for f in p.rglob("records.jsonl")
+                            if not {"preview", "exports", "sources"} & set(f.relative_to(p).parts[:-1]))
+    if not files:
+        raise SystemExit(f"No records.jsonl found under {[str(p) for p in paths]}")
+    rows = []
+    for f in files:
+        root = f.parent
+        while not (root / "params.json").exists() and root != root.parent:  # data root holds params.json
+            root = root.parent
+        recs = [json.loads(line) for line in f.open()]
+        by_pool = defaultdict(list)
+        for r in recs:
+            by_pool[r["dataset"]].append(r)
+        for pool, rs in by_pool.items():
+            for r in rs[:limit] if limit else rs:
+                fam = r["family"]
+                rows.append({
+                    "ID": r["id"], "image": str((root / r["image"]) if (root / r["image"]).exists() else f.parent / r["image"]),
+                    "topic": pool, "sub_topic": f"{pool} · {fam} · {r['role']}",
+                    "type_of_question": r["question_template"], "pixel": 448, "prompt": r["question"],
+                    "ground_truth": str(r["answer"]),
+                    # Only where the prior answer is wrong (counterfactuals), as in VLMBias.
+                    "expected_bias": None if r["familiar_answer"] in (None, r["answer"]) else str(r["familiar_answer"]),
+                })
+    print(f"Generated data: {len(rows)} items from {len(files)} records files")
+    return Dataset.from_list(rows).cast_column("image", Image())
+
+
 def load_done(path):
     done = {}
     if path.exists():
@@ -398,9 +452,14 @@ def main():
     if not variants:
         raise SystemExit("Nothing to evaluate: --skip-base given without --adapters.")
 
-    ds = load_dataset(DATASET_ID, split=args.split)
-    if args.limit:
-        ds = ds.select(range(min(args.limit, len(ds))))
+    if args.records:
+        ds = load_generated(args.records, args.limit)
+        data_tag = "gen-" + "+".join(p.resolve().name for p in args.records)[:60]
+    else:
+        ds = load_dataset(DATASET_ID, split=args.split)
+        if args.limit:
+            ds = ds.select(range(min(args.limit, len(ds))))
+        data_tag = args.split
     ids = ds["ID"]
     meta_cols = ["ID", "topic", "sub_topic", "type_of_question", "pixel", "prompt", "ground_truth", "expected_bias"]
 
@@ -408,7 +467,7 @@ def main():
     base_name = args.model.rstrip("/").split("/")[-1]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # Build names by string concat: Path.with_suffix would treat ".5-4B..." in "Qwen3.5-4B" as a suffix.
-    stems = {v: f"{base_name if v is None else base_name + '+' + v}_{args.split}_{mode}" for v in variants}
+    stems = {v: f"{base_name if v is None else base_name + '+' + v}_{data_tag}_{mode}" for v in variants}
     pred_paths = {v: args.output_dir / f"{stems[v]}.jsonl" for v in variants}
     done = {v: {} if args.rerun else load_done(pred_paths[v]) for v in variants}
 
@@ -438,7 +497,7 @@ def main():
                         pred=pred,
                         truncated=truncated,
                         correct=matches(pred, ex["ground_truth"]),
-                        bias_aligned=matches(pred, ex["expected_bias"]),
+                        bias_aligned=ex["expected_bias"] not in (None, "") and matches(pred, ex["expected_bias"]),
                     )
                     files[v].write(json.dumps(record) + "\n")
                     done[v][ex["ID"]] = record
@@ -453,14 +512,14 @@ def main():
         name = "base" if v is None else v
         summary = summarize([done[v][id_] for id_ in ids])
         summary["config"] = {"model": args.model, "adapter": None if v is None else str(adapters[v]),
-                             "split": args.split, "thinking": args.thinking,
+                             "data": data_tag, "thinking": args.thinking,
                              "max_new_tokens": max_new_tokens, "limit": args.limit}
         (args.output_dir / f"{stems[v]}_summary.json").write_text(json.dumps(summary, indent=2))
         print_summary(name, summary)
         summaries[name] = summary
     if len(summaries) > 1:
         print_comparison(summaries)
-        (args.output_dir / f"comparison_{args.split}_{mode}.json").write_text(json.dumps(summaries, indent=2))
+        (args.output_dir / f"comparison_{data_tag}_{mode}.json").write_text(json.dumps(summaries, indent=2))
     print(f"\nResults in {args.output_dir}/")
 
 

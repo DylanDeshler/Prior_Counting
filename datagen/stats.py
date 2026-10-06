@@ -261,13 +261,15 @@ def run_stats():
     pools = load_pools()
     if not pools:
         raise SystemExit("No pools built yet.")
-    plots = [plot_pool_sizes(pools), plot_e1_counts(pools),
-             plot_roles(pools, "e1/conflict", "E1 conflict pool: canonical vs counterfactual answers", "e1_roles.png"),
-             plot_roles(pools, "tests/T0/count", "T0 count: canonical vs counterfactual answers", "t0_roles.png"),
-             plot_roles(pools, "e2/L0/count", "Exp 2 L0 count conflict: canonical vs counterfactual", "e2_roles.png"),
-             plot_deltas(pools), plot_unit_sizes(pools), plot_placement(pools), plot_render_params(pools),
-             plot_color(pools), plot_crowds_and_shared(pools), plot_rejections()]
-    plots = [p for p in plots if p]
+    from tqdm import tqdm
+    jobs = [lambda: plot_pool_sizes(pools), lambda: plot_e1_counts(pools),
+            lambda: plot_roles(pools, "e1/conflict", "E1 conflict pool: canonical vs counterfactual answers", "e1_roles.png"),
+            lambda: plot_roles(pools, "tests/T0/count", "T0 count: canonical vs counterfactual answers", "t0_roles.png"),
+            lambda: plot_roles(pools, "e2/L0/count", "Exp 2 L0 count conflict: canonical vs counterfactual", "e2_roles.png"),
+            lambda: plot_deltas(pools), lambda: plot_unit_sizes(pools), lambda: plot_placement(pools),
+            lambda: plot_render_params(pools), lambda: plot_color(pools), lambda: plot_crowds_and_shared(pools),
+            plot_rejections]
+    plots = [p for p in (job() for job in tqdm(jobs, desc="stats plots", unit="plot")) if p]
     tables = summary_tables(pools)
     (OUT / "summary.json").write_text(json.dumps(tables, indent=1))
 

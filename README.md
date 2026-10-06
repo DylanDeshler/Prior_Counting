@@ -2,7 +2,9 @@
 
 ## Evaluation
 
-`run_vlms_are_biased.py` evaluates Qwen3.5-4B (and LoRA adapters) on VLMBias. See its docstring.
+`run_vlms_are_biased.py` evaluates Qwen3.5-4B (and LoRA adapters) on VLMBias, or on generated data
+with `--records <data dir | pool dirs | records.jsonl>` (e.g. `--records data/preview`,
+`--records data/tests/T0/count --limit 400`). See its docstring.
 
 ## Data generation (L0: Exp 1 + Exp 2 rendered level)
 

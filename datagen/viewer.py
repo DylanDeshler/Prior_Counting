@@ -252,9 +252,9 @@ def build_app():
 
 
 def view(port=7860):
-    import socket
-    print(f"Viewer on 127.0.0.1:{port}. From your laptop:\n"
-          f"    ssh -N -L {port}:localhost:{port} <user>@{socket.gethostname()}\n"
-          f"then open http://localhost:{port}")
+    import getpass
+    print(f"Viewer on 127.0.0.1:{port}. From your laptop, use the same target you normally ssh into:\n"
+          f"    ssh -N -L {port}:localhost:{port} {getpass.getuser()}@<host you ssh into, or your ~/.ssh/config alias>\n"
+          f"then open http://localhost:{port}   (VS Code Remote-SSH forwards the port automatically)")
     # Localhost only: the data must not be exposed on the hosted machine's public interface.
     build_app().launch(server_name="127.0.0.1", server_port=port, allowed_paths=[str(DATA)], share=False)

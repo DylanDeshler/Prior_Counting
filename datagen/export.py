@@ -9,6 +9,7 @@ reward function. Output is byte-identical for identical records: rows are ordere
 import json
 
 from PIL import Image
+from tqdm import tqdm
 
 from .common import DATA, IMG, item_seed, load_params, read_jsonl, rng_for
 
@@ -91,7 +92,7 @@ def load(pool, family=None, n_pairs=None, data_type=None):
 
 
 def export_arm(arm, train, val, fmt, blind, point_fmt):
-    for model in MODELS:
+    for model in tqdm(MODELS, desc=f"export {arm}/{fmt}", unit="model", leave=False):
         out = EXPORTS / arm / model / fmt
         sft, rl = rows_for(train, fmt, model, point_fmt, blind)
         write_rows(out / "train.jsonl", sft, arm)
@@ -103,7 +104,7 @@ def export_arm(arm, train, val, fmt, blind, point_fmt):
 
 def export_e1(point_fmt):
     shared, val_shared = load(SHARED), load(VAL_SHARED)
-    for arm, (pools, val_pools, fmt, blind, fam) in E1_ARMS.items():
+    for arm, (pools, val_pools, fmt, blind, fam) in tqdm(E1_ARMS.items(), desc="Exp 1 arms", unit="arm"):
         train = [r for p in pools for r in load(p, fam)] + shared
         val = [r for p in val_pools for r in load(p, fam)] + val_shared
         n = export_arm(arm, train, val, fmt, blind, point_fmt)
@@ -115,7 +116,7 @@ def export_e2(point_fmt):
     n = load_params()["e2_matched_n"]
     shared = load(SHARED)
     arms = {"C-L0": ("conflict", n), "N-L0": ("neutral", n), "C-L0x4": ("conflict", None), "N-L0x4": ("neutral", None)}
-    for arm, (dtype, n_pairs) in arms.items():
+    for arm, (dtype, n_pairs) in tqdm(arms.items(), desc="Exp 2 L0 arms", unit="arm"):
         train = load("e2/L0/count", data_type=dtype, n_pairs=n_pairs) + \
             load("e2/L0/color", data_type=dtype, n_pairs=n_pairs) + shared
         for fmt in ("number", "points"):
