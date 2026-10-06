@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 
 from .. import emoji as E
-from ..colornames import majority_name
+from ..colornames import majority_name, name_fractions
+from ..colorsets import VERIFY_MIN
 from ..common import SOURCES
 from ..render import rasterize_mask
 from .base import COLOR_SUFFIX, Family, components
@@ -50,8 +51,10 @@ def asset_stats(cps):
 
 
 class EmojiColor(Family):
-    """One recolorable emoji object. The first image of a pair is an identity recolor (null edit);
-    the second recolors the pixels named `term` to the target color with L fixed."""
+    """One recolorable emoji object. The pixels named `term` (the object's main color, §5.7) are
+    recolored with L fixed in BOTH images: the first to a confidently named start color (the familiar
+    CoDa color for conflict objects, a color from the CoDa distribution for neutral ones; semantically
+    a null edit), the second to the counterfactual / another neutral color."""
     name, unit = "emoji_color", "object"
     templates = {"how_many": "What color is the {object}?", "count_the": "Name the color of the {object}."}
     placement_kw = {"size_range": (150, 380)}
@@ -63,30 +66,39 @@ class EmojiColor(Family):
     def question(self, p, template):
         return self.templates[template].format(object=p["object"]) + COLOR_SUFFIX
 
+    @staticmethod
+    def _sample_neutral(o, rng, exclude=None):
+        terms = [t for t in sorted(o["target_probs"]) if t != exclude]
+        probs = np.array([o["target_probs"][t] for t in terms])
+        return terms[int(rng.choice(len(terms), p=probs / probs.sum()))]
+
     def sample(self, rng, count=None, object=None, mode="conflict"):
         o = color_objects()[object]
-        term = o["modal"] if o["group"] == "single" else o["current"]
         st = asset_stats(o["cps"])
-        return {"object": o["name"], "cps": o["cps"], "mode": mode, "term": term, "ab": None, "answer": term,
-                "colors": {"main": list(st["mean"])}}
+        if o["group"] == "single":
+            start, ab = (o["start"], o["start_ab"]) if o["start"] else (o["current"], None)
+        else:
+            start = self._sample_neutral(o, rng)
+            ab = o["targets"][start]
+        return {"object": o["name"], "cps": o["cps"], "mode": mode, "term": o["current"], "ab": ab,
+                "answer": start, "colors": {"main": list(st["mean"])}}
 
     def counterfactual(self, p, delta, rng):
         o = color_objects()[p["object"]]
         if p["mode"] == "conflict":
-            options = sorted(o["targets"])
+            options = sorted(t for t in o["targets"] if t != p["answer"])
             target = options[int(rng.integers(len(options)))]
-        else:  # neutral: sample from the object's own CoDa distribution, excluding the current color
-            terms = sorted(o["target_probs"])
-            probs = np.array([o["target_probs"][t] for t in terms])
-            target = terms[int(rng.choice(len(terms), p=probs / probs.sum()))]
+        else:  # neutral: another color from the object's own CoDa distribution
+            target = self._sample_neutral(o, rng, exclude=p["answer"])
         ab = o["targets"][target]
         return ({**p, "ab": ab, "answer": target},
-                {"op": "recolor", "params": {"from": p["term"], "to": target, "ab": ab, "k": self.K,
-                                             "feather": self.FEATHER}})
+                {"op": "recolor", "params": {"region": p["term"], "from": p["answer"], "to": target, "ab": ab,
+                                             "k": self.K, "feather": self.FEATHER}})
 
     def null_edit(self, p):
-        return {"op": "identity_recolor", "params": {"term": p["term"], "k": self.K, "feather": self.FEATHER},
-                "null_edit": True}
+        op = "identity_recolor" if p["ab"] is None else "recolor_to_start"
+        return {"op": op, "params": {"region": p["term"], "to": p["answer"], "ab": p["ab"], "k": self.K,
+                                     "feather": self.FEATHER}, "null_edit": True}
 
     def scene(self, p):
         key = E.recolor_key(p["cps"], p["term"], p["ab"], self.K, self.FEATHER)
@@ -99,10 +111,15 @@ class EmojiColor(Family):
         return [tuple(p["colors"]["main"]), TERM_RGB[p["answer"]], TERM_RGB[p["term"]]]
 
     def verify_color(self, img, p, aff):
-        """Majority color name of the recolor region in the rendered (pre-compression) image."""
-        m = rasterize_mask([("image", E.mask_key(p["cps"], p["term"]), (0.0, 0.0), 1.0)], aff)
-        eroded = cv2.erode(m.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2).astype(bool)
-        return majority_name(img, eroded if eroded.sum() >= 20 else m)
+        """Majority color name of the recolor region in the rendered (pre-compression) image; reported as
+        "mixed" unless that color also covers >= VERIFY_MIN of the whole object (one clear answer)."""
+        def eroded(prim):
+            m = rasterize_mask([prim], aff)
+            e = cv2.erode(m.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2).astype(bool)
+            return e if e.sum() >= 20 else m
+        name = majority_name(img, eroded(("image", E.mask_key(p["cps"], p["term"]), (0.0, 0.0), 1.0)))
+        whole = name_fractions(img, eroded(("image", f"emoji:{p['cps']}", (0.0, 0.0), 1.0))).get(name, 0.0)
+        return name if whole >= VERIFY_MIN else f"mixed ({name} covers {whole:.0%})"
 
 
 # ---------------------------------------------------------------------------

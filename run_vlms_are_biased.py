@@ -554,6 +554,11 @@ def main():
     summaries = {}
     for v in variants:
         name = "base" if v is None else v
+        # Re-score from the stored responses so parser changes apply to earlier runs too.
+        for r in done[v].values():
+            r["pred"] = extract_answer(r["response"])
+            r["correct"] = matches(r["pred"], r["ground_truth"])
+            r["bias_aligned"] = r["expected_bias"] not in (None, "") and matches(r["pred"], r["expected_bias"])
         summary = summarize([done[v][id_] for id_ in ids])
         summary["config"] = {"model": args.model, "adapter": None if v is None else str(adapters[v]),
                              "data": data_tag, "thinking": args.thinking,

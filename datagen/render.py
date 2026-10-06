@@ -123,16 +123,16 @@ def image_bbox(ext, aff):
 # ---------------------------------------------------------------------------
 
 def sample_placement(rng, extents, min_unit_local, size_range=(130, 380), margin=6, max_rotation=15.0,
-                     rotation=None):
+                     rotation=None, min_unit_px=MIN_UNIT_PX):
     """Pick one placement that fits every layout in `extents` (e.g. both images of a pair).
 
     Scale is chosen so the largest object dimension lands in size_range px and the smallest
-    unit is at least MIN_UNIT_PX px.
+    unit is at least min_unit_px (>= MIN_UNIT_PX, §3.1).
     """
     ext = (min(e[0] for e in extents), min(e[1] for e in extents),
            max(e[2] for e in extents), max(e[3] for e in extents))
     span = max(ext[2] - ext[0], ext[3] - ext[1])
-    lo = max(size_range[0] / span, MIN_UNIT_PX * 1.05 / min_unit_local)
+    lo = max(size_range[0] / span, max(min_unit_px, MIN_UNIT_PX) * 1.05 / min_unit_local)
     for _ in range(100):
         angle = float(rng.uniform(-max_rotation, max_rotation)) if rotation is None else rotation
         hi = size_range[1] / span

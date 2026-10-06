@@ -201,7 +201,9 @@ class PlayingCard(Family):
     distractor_exclude = ("heart", "diamond")
     templates = {"how_many": "How many pips are on this playing card?",
                  "count_the": "Count the pips on this playing card."}
-    PIP_H = 0.095
+    PIP_H = 0.12  # ~12% of card height (real cards ~15%); rows 0.135 apart so pips never touch
+    # Dense layouts: keep cells/pips countable (the model failed to count small, dense instances).
+    placement_kw = {"size_range": (220, 380), "min_unit_px": 20}
 
     def sample(self, rng, count=None):
         rank = int(rng.integers(2, 11))
@@ -224,7 +226,7 @@ class PlayingCard(Family):
 
     @staticmethod
     def grid_xy(c, r):
-        return ((c - 1) * 0.19, -0.36 + 0.12 * r)
+        return ((c - 1) * 0.205, -0.405 + 0.135 * r)
 
     def scene(self, p):
         col = p["colors"]
@@ -265,12 +267,14 @@ class GlyphsOnCard(Family):
     count_range = (1, 13)
     distractor_exclude = ("heart", "diamond")
     templates = {"how_many": "How many marks are on the card?", "count_the": "Count the marks on the card."}
-    SIZE = 0.09
+    SIZE = 0.12  # same glyph size as the card's pips, so the twin matches its conflict family
+    # Dense layouts: keep cells/pips countable (the model failed to count small, dense instances).
+    placement_kw = {"size_range": (220, 380), "min_unit_px": 20}
 
     def sample(self, rng, count=None):
         pts = None
         while pts is None:
-            pts = scatter(rng, count, (-0.3, -0.43, 0.3, 0.43), self.SIZE / 2 * 1.05, 0.03)
+            pts = scatter(rng, count, (-0.31, -0.45, 0.31, 0.45), self.SIZE / 2 * 1.05, 0.025)
         from ..render import random_color
         face = tuple(WHITES[int(rng.integers(len(WHITES)))])
         glyph_color = random_color(rng, s=(0.4, 1.0), v=(0.1, 0.6))

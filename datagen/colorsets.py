@@ -67,7 +67,8 @@ HELDOUT_FRAC = 0.2
 CONFLICT_MAX_P = 0.02
 REACH_MIN = 0.9    # share of recolored pixels named the target
 CONF_MIN = 0.6     # mean w2c probability of the target over those pixels (rejects e.g. cream labeled "brown")
-MASK_MIN = 0.3     # recolor region must cover this share of the object
+DOMINANT_MIN = 0.7  # the recolored (answer) color must cover >= 70% of the object, so "what color is X" has one answer
+VERIFY_MIN = 0.65   # same rule per rendered image (a little slack for resampling)
 CHROMATIC_MIN = 0.25
 # Lightness guards (mean L* of the recolored pixels): yellow/pink/orange read as olive/mauve/brown when dark,
 # brown reads as beige when light, even where w2c still names them.
@@ -142,6 +143,14 @@ def best_ab(lab_px, target, k=0.5, step=6):
     return best[1], best[2], best[3]
 
 
+def current_confidence(cps, term):
+    """Mean w2c probability of `term` over the emoji pixels named `term`."""
+    rgba = E.base_rgba(cps)
+    px = rgba[..., :3][E.term_mask(rgba, term)].astype(np.int64)
+    probs = w2c()[px[:, 0] // 8 + 32 * (px[:, 1] // 8) + 1024 * (px[:, 2] // 8)]
+    return float(probs[:, TERMS.index(term)].mean())
+
+
 def analyze(cps):
     """Object color: the dominant chromatic term if it covers >= CHROMATIC_MIN of the object, else the
     majority term. Returns (term, LAB samples of its pixels, its share of the object)."""
@@ -188,29 +197,45 @@ def build(coda, lvis, vcf):
         coda_p = c["coda"]
         modal = max(coda_p, key=coda_p.get)
         current, lab_px, share = analyze(c["cps"])
-        if share < MASK_MIN:
-            dropped[name] = f"{current} covers only {share:.0%} of the emoji"
+        if share < DOMINANT_MIN:
+            dropped[name] = f"{current} covers only {share:.0%} of the emoji (need {DOMINANT_MIN:.0%})"
             continue
-        if c["group"] == "single":
-            if current != modal:  # canonical filter: the unedited object must read as its modal color
-                dropped[name] = f"emoji reads {current}, CoDa modal {modal}"
-                continue
-            options = [t for t in CHROMATIC if t != modal and coda_p[t] < CONFLICT_MAX_P]
-        else:
-            options = [t for t in CHROMATIC if t != current and coda_p[t] > 0]
-        targets, reach = {}, {}
+        # Every chromatic color the main region can be recolored to with a confident name (§5.3).
+        # Both images of a pair are recolored to one of these, so labels never rest on how the emoji
+        # happens to be drawn (e.g. a dark orange chair that people call brown).
         mean_l = float(lab_px[:, 0].mean())
-        options = [t for t in options if L_RANGE.get(t, (0, 101))[0] <= mean_l <= L_RANGE.get(t, (0, 101))[1]]
-        for t in options:
+        reach_ab, reach = {}, {}
+        for t in CHROMATIC:
+            lo, hi = L_RANGE.get(t, (0, 101))
+            if not lo <= mean_l <= hi:
+                continue
             ab, frac, conf = best_ab(lab_px, t)
             reach[t] = [round(frac, 3), round(conf, 3)]
             if frac >= REACH_MIN and conf >= CONF_MIN:
-                targets[t] = [round(ab[0], 1), round(ab[1], 1)]
+                reach_ab[t] = [round(ab[0], 1), round(ab[1], 1)]
+        if c["group"] == "single":
+            if modal in CHROMATIC:
+                if modal not in reach_ab:
+                    dropped[name] = f"modal {modal} not reachable at L*={mean_l:.0f} ({reach})"
+                    continue
+                start = modal  # canonical: recolored to the familiar color
+            elif current == modal and current_confidence(c["cps"], current) >= CONF_MIN:
+                start = None   # achromatic familiar color (white snowman): identity recolor
+            else:
+                dropped[name] = f"achromatic modal {modal}, emoji reads {current}"
+                continue
+            targets = {t: ab for t, ab in reach_ab.items() if t != modal and coda_p[t] < CONFLICT_MAX_P}
+        else:
+            start = None       # sampled per item from target_probs
+            targets = {t: ab for t, ab in reach_ab.items() if coda_p[t] > 0}
+            if len(targets) < 2:
+                targets = {}
         if not targets:
             dropped[name] = f"no reachable target colors ({reach})"
             continue
-        rec = {"name": name, **c, "modal": modal, "current": current, "mean_l": round(mean_l, 1),
-               "targets": targets, "reach": reach}
+        rec = {"name": name, **c, "modal": modal, "current": current, "share": round(share, 3),
+               "mean_l": round(mean_l, 1), "start": start, "start_ab": reach_ab.get(start), "targets": targets,
+               "reach": reach}
         if c["group"] == "any":
             z = sum(coda_p[t] for t in targets)
             rec["target_probs"] = {t: round(coda_p[t] / z, 4) for t in targets}

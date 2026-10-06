@@ -21,6 +21,8 @@ class Calendar(Family):
     name, unit, label, familiar = "calendar", "day column", "column", 7
     count_range = (4, 10)
     distractor_exclude = ("square",)
+    # Dense layouts: keep cells/pips countable (the model failed to count small, dense instances).
+    placement_kw = {"size_range": (220, 380), "min_unit_px": 20}
     templates = {"how_many": "How many day columns does this calendar have?",
                  "count_the": "Count the day columns in this calendar."}
     W, H, GAP, MARGIN, HEADER = 0.12, 0.1, 0.022, 0.04, 0.13
@@ -80,6 +82,8 @@ class Grid(Family):
     name, unit, label = "twin_grid", "column", "column"
     count_range = (1, 14)
     distractor_exclude = ("square",)
+    # Dense layouts: keep cells/pips countable (the model failed to count small, dense instances).
+    placement_kw = {"size_range": (220, 380), "min_unit_px": 20}
     templates = {"how_many": "How many columns does this grid have?", "count_the": "Count the columns in this grid."}
 
     def sample(self, rng, count=None):
@@ -209,6 +213,8 @@ class Rubik(Family):
     name, unit, familiar = "rubik", "row", 3
     count_range = (1, 6)
     distractor_exclude = ("square",)
+    # Dense layouts: keep cells/pips countable (the model failed to count small, dense instances).
+    placement_kw = {"size_range": (220, 380), "min_unit_px": 20}
     templates = {"how_many": "How many {dim} of squares are on this face of the cube?",
                  "count_the": "Count the {dim} of squares on this face of the cube."}
     CELL, GAP, MARGIN = 0.3, 0.03, 0.04
@@ -278,6 +284,8 @@ class ColoredGrid(Family):
     name, unit = "twin_colored_grid", "row"
     count_range = (1, 8)
     distractor_exclude = ("square",)
+    # Dense layouts: keep cells/pips countable (the model failed to count small, dense instances).
+    placement_kw = {"size_range": (220, 380), "min_unit_px": 20}
     templates = {"how_many": "How many {dim} does this grid have?", "count_the": "Count the {dim} in this grid."}
 
     label_for = Rubik.label_for

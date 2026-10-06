@@ -8,11 +8,18 @@ def normalize(s):
     return str(s).strip().strip("{}").strip().rstrip(".").lower()
 
 
+BARE = re.compile(r"^\s*([A-Za-z]+|\d+)\s*\.?\s*$")
+
+
 def extract_answer(text):
-    """Return the content of the last {...} in the response (after any thinking block)."""
+    """Content of the last {...} in the response (after any thinking block). If there are no braces,
+    accept a reply that is nothing but the answer ("6", "red"); never pick numbers out of prose."""
     text = text.split("</think>")[-1]
     matches = re.findall(r"\{([^{}]*)\}", text)
-    return matches[-1].strip() if matches else ""
+    if matches:
+        return matches[-1].strip()
+    bare = BARE.match(text)
+    return bare.group(1) if bare else ""
 
 
 def matches(pred, target):
