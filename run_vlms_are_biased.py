@@ -240,7 +240,11 @@ class ChunkProgress:
     def __init__(self, bar):
         self.bar = bar
 
-    def __call__(self, total=None, **_):
+    def __call__(self, iterable=None, total=None, **_):
+        # vLLM also wraps plain iterables (e.g. "Rendering conversations"); pass those through.
+        if iterable is not None:
+            self.bar.set_postfix_str("preparing prompts")
+            return iterable
         self.total, self.n = total, 0
         self.bar.set_postfix_str(f"batch: {total} running")
         return self
