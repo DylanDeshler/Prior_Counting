@@ -48,8 +48,18 @@ VARIABLE = {"die", "playing_card", "domino"}
 SYSTEM = "The image is not available to you. Answer the question with your best guess."
 
 
+def require_free_gpu(fraction):
+    """vLLM reserves `fraction` of total GPU memory; fail fast with a clear message if it isn't free."""
+    import torch
+    free, total = torch.cuda.mem_get_info()
+    if free < fraction * total:
+        raise SystemExit(f"GPU busy: {free / 2**30:.1f} GiB free of {total / 2**30:.1f} GiB, this tool needs "
+                         f"~{fraction * total / 2**30:.1f} GiB. Rerun when other jobs finish (check with nvidia-smi).")
+
+
 def main(model="Qwen/Qwen3.5-4B"):
     from vllm import LLM, SamplingParams
+    require_free_gpu(0.3)
     recs = []
     for pool in POOLS:
         f = DATA / pool / "records.jsonl"

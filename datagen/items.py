@@ -207,7 +207,10 @@ def attempt_job(job, attempt):
         feasible = fam.feasible_deltas(first, tuple(job.get("deltas", DELTAS)))
         if not feasible:
             raise Rejected("no feasible delta")
-        delta = int(feasible[int(rng.integers(len(feasible)))])
+        # Δ depends on the item, not the attempt: retries after a failed recount re-render but keep Δ,
+        # so rejections can't skew the Δ histogram. Consecutive items cycle through the allowed values.
+        offset = item_seed(job["dataset"], job["family"], "delta")
+        delta = int(sorted(feasible)[(job["idx"] + offset) % len(feasible)])
     second, edit = fam.counterfactual(first, delta, rng)
     photo = job.get("photo", False)
     shared = common_render(fam, rng, [first, second], job.get("distractors", True) and not photo, not photo)

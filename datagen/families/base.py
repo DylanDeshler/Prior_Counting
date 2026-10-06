@@ -126,9 +126,21 @@ def polygon_vertices(mask, eps_frac=0.012):
     return cv2.approxPolyDP(c, eps_frac * cv2.arcLength(c, True), True)[:, 0, :]
 
 
-def convex_vertex_count(poly):
-    """Number of convex vertices of a simple polygon (tips of a star / burst)."""
+def convex_vertex_count(poly, max_angle=150.0):
+    """Number of sharp convex vertices of a simple polygon (tips of a star / burst). Vertices whose
+    interior angle is >= max_angle are near-straight artifacts of polygon simplification, not tips."""
     p = poly.astype(float)
+    # A rounded (outlined) tip can come out as two vertices a few px apart: merge close neighbours.
+    merge = 0.04 * np.hypot(*np.ptp(p, axis=0))
+    merged = [p[0]]
+    for q in p[1:]:
+        if np.linalg.norm(q - merged[-1]) < merge:
+            merged[-1] = (merged[-1] + q) / 2
+        else:
+            merged.append(q)
+    if len(merged) > 2 and np.linalg.norm(merged[0] - merged[-1]) < merge:
+        merged[0] = (merged[0] + merged.pop()) / 2
+    p = np.array(merged)
     area = 0.5 * np.sum(p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1])
     sign = np.sign(area)
     n = len(p)
@@ -136,7 +148,9 @@ def convex_vertex_count(poly):
     for i in range(n):
         a, b, c = p[i - 1], p[i], p[(i + 1) % n]
         cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])
-        if np.sign(cross) == sign:
+        u, v = a - b, c - b
+        angle = np.degrees(np.arccos(np.clip(u @ v / (np.linalg.norm(u) * np.linalg.norm(v) + 1e-9), -1, 1)))
+        if np.sign(cross) == sign and angle < max_angle:
             cnt += 1
     return cnt
 

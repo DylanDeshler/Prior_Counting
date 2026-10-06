@@ -54,8 +54,18 @@ def f1(pred, masks):
     return 2 * tp / (len(pred) + len(masks))
 
 
+def require_free_gpu(fraction):
+    """vLLM reserves `fraction` of total GPU memory; fail fast with a clear message if it isn't free."""
+    import torch
+    free, total = torch.cuda.mem_get_info()
+    if free < fraction * total:
+        raise SystemExit(f"GPU busy: {free / 2**30:.1f} GiB free of {total / 2**30:.1f} GiB, this tool needs "
+                         f"~{fraction * total / 2**30:.1f} GiB. Rerun when other jobs finish (check with nvidia-smi).")
+
+
 def main(model="Qwen/Qwen3.5-4B", n=240):
     from vllm import LLM, SamplingParams
+    require_free_gpu(0.3)
     recs = [json.loads(l) for l in (DATA / "e1/conflict/records.jsonl").open()]
     rng = np.random.default_rng(0)
     recs = [recs[i] for i in sorted(rng.choice(len(recs), size=min(n, len(recs)), replace=False))]
