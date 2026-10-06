@@ -100,7 +100,7 @@ def parse_args():
                    help="Evaluate generated data instead of VLMBias: data dir, pool dirs, or records.jsonl files.")
     p.add_argument("--limit", type=int, default=None, help="Evaluate only the first N items.")
     p.add_argument("--thinking", action="store_true", help="Enable Qwen3.5 thinking mode (off by default).")
-    p.add_argument("--max-new-tokens", type=int, default=None,
+    p.add_argument("--max-new-tokens", type=int, default=8192,
                    help="Default: no limit beyond the model's context window.")
     p.add_argument("--rerun", action="store_true",
                    help="Ignore existing predictions and regenerate all questions (overwrites results).")
@@ -232,6 +232,46 @@ def adapter_info(path, base_model):
 # Backends
 # ---------------------------------------------------------------------------
 
+class ChunkProgress:
+    """Stands in for the tqdm bar vLLM creates per generate call: forwards each finished request to
+    the run's overall bar, and shows vLLM's token throughput plus how many requests in the current
+    call are still running (a long tail = a few long generations, not a hang)."""
+
+    def __init__(self, bar):
+        self.bar = bar
+
+    def __call__(self, total=None, **_):
+        self.total, self.n = total, 0
+        self.bar.set_postfix_str(f"batch: {total} running")
+        return self
+
+    @property
+    def format_dict(self):
+        return self.bar.format_dict
+
+    @property
+    def postfix(self):
+        return ""
+
+    @postfix.setter
+    def postfix(self, text):  # vLLM writes "est. speed input: ... toks/s, output: ... toks/s"
+        out = text.split("output:")[-1].strip() if text else ""
+        # vLLM sets this just before counting the request that finished, hence the -1.
+        self.bar.set_postfix_str(f"batch: {max(0, self.total - self.n - 1)} running, out {out}", refresh=False)
+
+    def update(self, k=1):
+        self.n += k
+        if self.n >= self.total:
+            self.bar.set_postfix_str("batch done, saving", refresh=False)
+        self.bar.update(k)
+
+    def refresh(self):
+        self.bar.refresh()
+
+    def close(self):
+        pass
+
+
 def build_messages(ex):
     return [{
         "role": "user",
@@ -281,7 +321,7 @@ class VLLMBackend:
         self.adapters = adapters
         self.lora_ids = {name: i + 1 for i, name in enumerate(adapters)}
 
-    def generate(self, examples, variants):
+    def generate(self, examples, variants, bar):
         from vllm.lora.request import LoRARequest
 
         loras = [None if v is None else LoRARequest(v, self.lora_ids[v], str(self.adapters[v].resolve()))
@@ -294,7 +334,7 @@ class VLLMBackend:
             ],
         }] for ex in examples]
         outputs = self.llm.chat(convs, self.sampling, lora_request=loras,
-                                chat_template_kwargs=self.chat_kwargs, use_tqdm=False)
+                                chat_template_kwargs=self.chat_kwargs, use_tqdm=ChunkProgress(bar))
         return [(o.outputs[0].text.strip(), o.outputs[0].finish_reason == "length") for o in outputs]
 
 
@@ -344,7 +384,7 @@ class HFBackend:
         self.thinking = args.thinking
         self.batch_size = args.batch_size
 
-    def generate(self, examples, variants):
+    def generate(self, examples, variants, bar):
         results = [None] * len(examples)
         for v in dict.fromkeys(variants):
             if self.has_adapters:
@@ -354,11 +394,11 @@ class HFBackend:
                     self.model.enable_adapters()
                     self.model.set_adapter(v)
             idx = [i for i, vi in enumerate(variants) if vi == v]
-            for i, r in zip(idx, self._generate([examples[i] for i in idx])):
+            for i, r in zip(idx, self._generate([examples[i] for i in idx], bar)):
                 results[i] = r
         return results
 
-    def _generate(self, examples):
+    def _generate(self, examples, bar):
         results = [None] * len(examples)
         # Sort by image size so each batch has similar sequence lengths (less padding).
         order = sorted(range(len(examples)), key=lambda i: examples[i]["pixel"])
@@ -384,6 +424,7 @@ class HFBackend:
                 # Finished rows end in EOS/padding; a row that hit the token limit ends mid-text.
                 truncated = len(row) >= limit and row[-1].item() not in stop_ids
                 results[i] = (self.processor.decode(row, skip_special_tokens=True).strip(), truncated)
+            bar.update(len(idx))
         return results
 
 
@@ -482,13 +523,13 @@ def main():
         # image is decoded once per chunk; vLLM batches the different LoRAs together.
         jobs = [(i, v) for i, id_ in enumerate(ids) for v in variants if id_ not in done[v]]
         files = {v: pred_paths[v].open("w" if args.rerun else "a") for v in variants}
-        with tqdm(total=len(jobs), desc="generating") as bar:
+        with tqdm(total=len(jobs), desc="generating", unit="q", dynamic_ncols=True, smoothing=0.05) as bar:
             for start in range(0, len(jobs), args.chunk_size):
                 chunk = jobs[start:start + args.chunk_size]
                 rows = sorted({i for i, _ in chunk})
                 by_row = dict(zip(rows, ds.select(rows)))
                 examples = [by_row[i] for i, _ in chunk]
-                outputs = backend.generate(examples, [v for _, v in chunk])
+                outputs = backend.generate(examples, [v for _, v in chunk], bar)
                 for (_, v), ex, (response, truncated) in zip(chunk, examples, outputs):
                     pred = extract_answer(response)
                     record = {k: ex[k] for k in meta_cols}
@@ -503,7 +544,6 @@ def main():
                     done[v][ex["ID"]] = record
                 for f in files.values():
                     f.flush()
-                bar.update(len(chunk))
         for f in files.values():
             f.close()
 
