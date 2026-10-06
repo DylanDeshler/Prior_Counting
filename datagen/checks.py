@@ -20,8 +20,8 @@ from .families import E1_FAMILIES, HELD_OUT
 from .items import render_clean, render_record
 
 POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict", "e1/val_neutral", "e1/val_shared",
-         "tests/T0/count", "tests/T0/color", "e2/L0/count", "e2/L0/color"]
-TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L0/color"]
+         "tests/T0/count", "e2/L0/count", "e2/L2/color", "tests/T2/color"]
+TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L2/color"]
 
 # Allowed Δ per family (§4.2, §5.2). Fixed-canonical families use exactly these values, uniformly.
 FIXED_DELTAS = {"clock": {-3, -2, -1, 1, 2, 3}, "stop_sign": {-3, -2, -1, 1, 2, 3}, "calendar": {-3, -2, -1, 1, 2, 3},
@@ -95,8 +95,6 @@ def check_points_in_masks(rep, pools, tol_px=0):
     bad, total = [], 0
     for pool, recs in pools.items():
         for r in tqdm(recs, desc=f"points in masks {pool}", unit="rec", leave=False):
-            if r["prior"] != "count":
-                continue
             for (x, y), m in zip(r["points"], r["masks_rle"]):
                 total += 1
                 mask = rle_decode(m)
@@ -109,7 +107,7 @@ def check_points_in_masks(rep, pools, tol_px=0):
 
 
 def check_determinism(rep, pools, n=100, seed=0):
-    recs = [r for p in pools.values() for r in p if r["level"] == "L0"]
+    recs = [r for p in pools.values() for r in p]
     rng = np.random.default_rng(seed)
     sample = [recs[i] for i in rng.choice(len(recs), size=min(n, len(recs)), replace=False)]
     bad = []
@@ -178,7 +176,7 @@ def check_distributions(rep, pools):
         recs = pools["e2/L0/count"]
         a = Counter(r["answer"] for r in recs if r["data_type"] == "conflict")
         b = Counter(r["answer"] for r in recs if r["data_type"] == "neutral")
-        if a != b:
+        if b and a != b:
             problems.append("e2/L0/count neutral crowd histogram != pooled conflict histogram")
         q = Counter(r["family"] for r in recs if r["data_type"] == "conflict")
         if len(set(q.values())) > 1:
@@ -207,7 +205,9 @@ def check_leakage(rep, pools):
         co = json.loads(color_file.read_text())
         objs = co.get("objects", co if isinstance(co, list) else [])
         held_color = {o["name"] for o in objs if o.get("split") == "heldout"}
-        vcf = set(co.get("vcf_objects", []))
+        vcf = set(co.get("vcf_color_objects", []))
+    excl = DATA / "exclusions" / "coco_image_ids.json"
+    excluded_ids = set(json.loads(excl.read_text())["ids"]) if excl.exists() else set()
     for pool in TRAIN_POOLS:
         for r in pools.get(pool, []):
             if r["family"] in HELD_OUT or r["render"]["generator"] in HELD_OUT:
@@ -218,6 +218,15 @@ def check_leakage(rep, pools):
             obj = r["render"]["params"].get("object")
             if obj and (obj in held_color or obj in vcf):
                 problems.append(f"{r['id']}: held-out / Visual CounterFact color object {obj}")
+            if r["level"] != "L0":  # photo-derived: eval image ids and near-duplicates (§9.2, §9.4)
+                if r["source"]["image_id"] in excluded_ids:
+                    problems.append(f"{r['id']}: COCO image {r['source']['image_id']} is used by an eval set")
+                if r["checks"].get("phash_min_dist", 99) <= 6:
+                    problems.append(f"{r['id']}: near-duplicate of an eval image")
+    test_ids = {r["source"]["image_id"] for p in ("tests/T2/color",) for r in pools.get(p, [])}
+    train_ids = {r["source"]["image_id"] for p in TRAIN_POOLS for r in pools.get(p, []) if r["level"] != "L0"}
+    if test_ids & train_ids:
+        problems.append(f"{len(test_ids & train_ids)} source photos appear in both training and T2 (§9.6)")
     if not excl_file.exists():
         problems.append("exclusions/vlmbias_categories.json missing (run `python -m datagen sources`)")
     rep.add("leakage: no held-out families/objects or excluded categories in training", not problems,

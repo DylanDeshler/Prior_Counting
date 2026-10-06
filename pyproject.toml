@@ -17,6 +17,9 @@ dependencies = [
     "tqdm>=4.66",
     "matplotlib>=3.8",
     "gradio>=5.0",
+    "nltk>=3.8",
+    "imagehash>=4.3",
+    "pyarrow>=15",
 ]
 
 [dependency-groups]

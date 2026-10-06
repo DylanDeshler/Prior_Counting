@@ -4,14 +4,14 @@ from .grids import Bars, Calendar, ColoredGrid, Grid, Piano, Rubik
 from .pips import Die, Domino, DotsInSplitRect, DotsInSquare, GlyphsOnCard, PlayingCard
 from .radial import Burst, Clock, ClockNumerals, NGon, Snowflake, Star, StopSign, TickRing, TrafficLight
 from .shapes import SharedShapes
-from .emoji import EmojiColor, EmojiCrowd
+from .photo import PhotoColor
 
 GENERATORS = {g.name: g for g in [
     Die(), PlayingCard(), Domino(), Clock(), StopSign(), Star(), Calendar(), Piano(), Rubik(),
     TrafficLight(), Snowflake(), ClockNumerals(),
     DotsInSquare(), GlyphsOnCard(), DotsInSplitRect(), TickRing(), NGon(), Burst(), Grid(), Bars(), ColoredGrid(),
     SharedShapes(),
-    EmojiColor(), EmojiCrowd(),
+    PhotoColor(),
 ]}
 
 # Exp 1 conflict families (§4.2) in a fixed order, and each one's neutral twin.

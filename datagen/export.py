@@ -112,16 +112,26 @@ def export_e1(point_fmt):
 
 
 def export_e2(point_fmt):
-    """Exp 2 L0 arms (§5.8) in both count formats; color targets are always {color}."""
+    """Exp 2 arms per level (§5.8) in both count formats; color targets are always {color}."""
     n = load_params()["e2_matched_n"]
     shared = load(SHARED)
-    arms = {"C-L0": ("conflict", n), "N-L0": ("neutral", n), "C-L0x4": ("conflict", None), "N-L0x4": ("neutral", None)}
-    for arm, (dtype, n_pairs) in tqdm(arms.items(), desc="Exp 2 L0 arms", unit="arm"):
-        train = load("e2/L0/count", data_type=dtype, n_pairs=n_pairs) + \
-            load("e2/L0/color", data_type=dtype, n_pairs=n_pairs) + shared
-        for fmt in ("number", "points"):
-            export_arm(arm, train, None, fmt, False, point_fmt)
-        print(f"{arm:<20} {len(train)} train rows (number + points)")
+    for level in ("L0", "L2"):
+        arms = {f"C-{level}": ("conflict", n), f"N-{level}": ("neutral", n),
+                f"C-{level}x4": ("conflict", None), f"N-{level}x4": ("neutral", None)}
+        for arm, (dtype, n_pairs) in tqdm(arms.items(), desc=f"Exp 2 {level} arms", unit="arm"):
+            export_e2_arm(arm, level, dtype, n_pairs, shared, point_fmt)
+
+
+def export_e2_arm(arm, level, dtype, n_pairs, shared, point_fmt):
+    varying = [r for pool in (f"e2/{level}/count", f"e2/{level}/color") if (DATA / pool / "records.jsonl").exists()
+               for r in load(pool, data_type=dtype, n_pairs=n_pairs)]
+    if not varying:
+        print(f"{arm:<20} skipped: no {dtype} items at {level}")
+        return
+    train = varying + shared
+    for fmt in ("number", "points"):
+        export_arm(arm, train, None, fmt, False, point_fmt)
+    print(f"{arm:<20} {len(train)} train rows (number + points)")
 
 
 def export(which=("e1", "e2")):

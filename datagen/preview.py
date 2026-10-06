@@ -4,7 +4,7 @@
     python -m datagen --data PATH/preview view              # or open PATH/preview/reports/index.html
 
 Uses data/sources if present. Without the Open Images download it renders flat/noise backgrounds
-only; it fetches the small color sources (CoDa, Noto Emoji, color-name table) if missing.
+only.
 """
 
 import json
@@ -20,9 +20,6 @@ ROOT = DATA / "preview"
 
 def prepare():
     (DATA / "sources").mkdir(parents=True, exist_ok=True)
-    if not (DATA / "sources" / "color_objects.json").exists():
-        from .build_color import fetch_all
-        fetch_all()
     ROOT.mkdir(parents=True, exist_ok=True)
     link = ROOT / "sources"
     if not link.exists():
@@ -48,7 +45,9 @@ def run_inside():
     from . import build as b
     b.E1_PAIRS, b.E1_VAL_IMAGES, b.SHARED_N = 72, 36, 36
     b.T0_COUNT_PAIRS = {"traffic_light": 8, "snowflake": 8}
-    b.T0_COLOR_PAIRS = 8
+    b.T2_COLOR_PAIRS = 8
+    from . import photo_color
+    photo_color.MAX_ANALYZE_PER_OBJECT = 4  # L2 sample only if the photo sources were fetched
     b.build()
     from .export import export
     export()

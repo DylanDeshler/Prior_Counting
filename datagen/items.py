@@ -30,6 +30,10 @@ class Rejected(Exception):
     pass
 
 
+class Unusable(Rejected):
+    """The item can never pass (e.g. near-duplicate of an eval image): don't retry."""
+
+
 # ---------------------------------------------------------------------------
 # Rendering from a record
 # ---------------------------------------------------------------------------
@@ -91,7 +95,8 @@ def finalize(rec, out_root=DATA, write=True):
         raise Rejected(f"unit size {min_size:.1f}px < {MIN_UNIT_PX}")
     if rec["prior"] == "count" and len(points) != rec["answer"]:
         raise Rejected(f"{len(points)} units but answer {rec['answer']}")
-    x0, y0, x1, y1 = image_bbox(local_extent(prims), aff)
+    x0, y0, x1, y1 = fam.object_bbox(rec["render"]["params"]) if hasattr(fam, "object_bbox") else \
+        image_bbox(local_extent(prims), aff)
     rec["points"], rec["masks_rle"] = points, masks
     rec["unit_size_px"] = round(med_size, 2)
     rec["object_bbox"] = [max(0, int(x0)), max(0, int(y0)), min(IMG, int(np.ceil(x1))), min(IMG, int(np.ceil(y1)))]
@@ -107,6 +112,8 @@ def finalize(rec, out_root=DATA, write=True):
         if name != rec["answer"]:
             raise Rejected(f"color name {name} != answer {rec['answer']}")
     img = compress(clean, rec["compression"])
+    if hasattr(fam, "post_check"):  # e.g. near-duplicate check against eval images (§9.4)
+        fam.post_check(img, rec)
     if write:
         rec["image_sha256"] = save_png(img, out_root / rec["image"])
     return rec
@@ -128,7 +135,7 @@ def base_record(job, role, params, edit, render, compression, seed, attempt, fam
         "pair_id": stem if job["kind"] == "pair" else None,
         "dataset": job["dataset"],
         "pool_index": job.get("pool_index", job["idx"]),
-        "level": "L0",
+        "level": job.get("level", "L0"),
         "prior": job.get("prior", "count"),
         "data_type": job["data_type"],
         "role": role,
@@ -147,9 +154,10 @@ def base_record(job, role, params, edit, render, compression, seed, attempt, fam
         "object_bbox": None,
         "edit": {"op": edit.get("op", "none"), "params": edit.get("params", {}),
                  "null_edit": bool(edit.get("null_edit", False))},
-        "source": {"dataset": None, "image_id": None, "ann_ids": [], "license": "generated",
-                   "background": ({"dataset": "openimages_v7_train", "image_id": bg["file"].rsplit(".", 1)[0],
-                                   "license": "CC-BY-2.0"} if bg["kind"] == "photo" else None)},
+        "source": job.get("source") or {
+            "dataset": None, "image_id": None, "ann_ids": [], "license": "generated",
+            "background": ({"dataset": "openimages_v7_train", "image_id": bg["file"].rsplit(".", 1)[0],
+                            "license": "CC-BY-2.0"} if bg["kind"] == "photo" else None)},
         "render": render,
         "compression": compression,
         "seed": seed,
@@ -160,7 +168,7 @@ def base_record(job, role, params, edit, render, compression, seed, attempt, fam
     }
 
 
-def common_render(fam, rng, layouts, distractors=True):
+def common_render(fam, rng, layouts, distractors=True, background=True):
     """Shared render parameters for all images of one item (pairs share everything, §4.1)."""
     scenes = [fam.scene(p) for p in layouts]
     if fam.fixed_frame:
@@ -173,7 +181,8 @@ def common_render(fam, rng, layouts, distractors=True):
         aff = Affine.from_params(placement)
         boxes = [image_bbox(e, aff) for e in exts]
         union = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
-    background = sample_background(rng, fam.main_color(layouts[0]))
+    # Photo levels: the image prim covers the frame, so no background or distractors.
+    background = sample_background(rng, fam.main_color(layouts[0])) if background else {"kind": "flat", "color": [0, 0, 0]}
     ds = [] if (fam.fixed_frame or not distractors) else \
         sample_distractors(rng, union, fam.distractor_exclude, avoid_colors=fam.colors(layouts[0]))
     return {"placement": placement, "background": background, "distractors": ds}
@@ -200,7 +209,8 @@ def attempt_job(job, attempt):
             raise Rejected("no feasible delta")
         delta = int(feasible[int(rng.integers(len(feasible)))])
     second, edit = fam.counterfactual(first, delta, rng)
-    shared = common_render(fam, rng, [first, second], job.get("distractors", True))
+    photo = job.get("photo", False)
+    shared = common_render(fam, rng, [first, second], job.get("distractors", True) and not photo, not photo)
     compression = sample_compression(rng)
     roles = job.get("roles", ("canonical", "counterfactual"))
     familiar = first.get("answer", first.get("count")) if job["data_type"] == "conflict" else None
@@ -217,12 +227,18 @@ def attempt_job(job, attempt):
 def run_job(job):
     """Returns (records, n_rejected, last_error)."""
     errors = []
-    for attempt in range(MAX_ATTEMPTS):
+    for attempt in range(5 if job.get("optional") else MAX_ATTEMPTS):
         try:
             recs = attempt_job(job, attempt)
             return [finalize(r) for r in recs], attempt, None
+        except Unusable as e:
+            if job.get("optional"):
+                return [], attempt + 1, str(e)
+            raise
         except (Rejected, ValueError) as e:
             errors.append(str(e))
             if job.get("debug"):
                 print(f"reject {job['family']}/{job['idx']} attempt {attempt}: {e}")
+    if job.get("optional"):  # photo items: an unusable instance is dropped, not fatal
+        return [], MAX_ATTEMPTS, errors[-1]
     raise RuntimeError(f"job {job['dataset']}/{job['family']}/{job['idx']} failed {MAX_ATTEMPTS} attempts: {errors[-3:]}")

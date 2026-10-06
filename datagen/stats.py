@@ -183,7 +183,7 @@ def plot_render_params(pools):
 
 
 def plot_color(pools):
-    recs = [r for p in ("e2/L0/color", "tests/T0/color") for r in pools.get(p, [])]
+    recs = [r for p in ("e2/L2/color", "tests/T2/color") for r in pools.get(p, [])]
     if not recs:
         return None
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.8))
@@ -199,7 +199,7 @@ def plot_color(pools):
     axes[2].barh(keys[::-1], [objs[k] for k in keys[::-1]], color=BLUE, edgecolor=SURFACE)
     axes[2].grid(axis="x"), axes[2].grid(axis="y", visible=False)
     axes[2].set_title("Pairs per object (all color pools)", loc="left")
-    return _save(fig, "color.png", "Color items (Exp 2 L0 + T0)")
+    return _save(fig, "color.png", "Color items (Exp 2 L2 + T2, real photos)")
 
 
 def plot_crowds_and_shared(pools):

@@ -1,5 +1,5 @@
 """External inputs for L0 (§8): Open Images background photos and VLMBias statistics/exclusions.
-Color/emoji sources live in colorsets.py / emoji.py / colornames.py."""
+Photo-level sources live in coco.py, colorsets.py and exclusions.py."""
 
 import io
 import json
@@ -101,5 +101,9 @@ def fetch_vlmbias_stats():
 def fetch_all():
     fetch_vlmbias_stats()
     fetch_openimages_backgrounds()
-    from . import build_color
-    build_color.fetch_all()
+    # Photo levels (L2 color): COCO/LVIS annotations, CoDa x LVIS color objects, eval-set exclusions.
+    from . import coco, colornames, colorsets, exclusions
+    colornames.fetch()
+    coco.fetch_all()
+    colorsets.fetch()
+    exclusions.fetch_all()

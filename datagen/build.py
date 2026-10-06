@@ -5,8 +5,8 @@ Steps (each writes <dir>/images/*.png + <dir>/records.jsonl and reports/build_<s
     e1           E1 conflict pool (3,584 pairs), neutral pool (7,168), dice pool (3,584 pairs),
                  synthetic validation (1,024 per data type)       e1/{conflict,neutral,dice,val_*}/
     t0           T0 count: traffic lights + snowflakes (500 + 500 pairs); T0 color (500 pairs)
-    e2           Exp 2 L0: count conflict (stop signs + numeral clocks) and neutral crowds, color conflict
-                 and neutral; 4N pairs each (the N-pair arms are prefixes, §5.8)   e2/L0/{count,color}/
+    e2           Exp 2 L0 count conflict (stop signs + numeral clocks), 4N pairs (N-pair arms are prefixes,
+                 §5.8)                                                              e2/L0/count/
 """
 
 import json
@@ -25,10 +25,10 @@ from .items import run_job
 TEMPLATES = ("how_many", "count_the")
 E1_PAIRS, E1_VAL_IMAGES, SHARED_N = 3584, 1024, 1024
 T0_COUNT_PAIRS = {"traffic_light": 500, "snowflake": 500}
-T0_COLOR_PAIRS = 500
 E2_VOLUME = 4  # C-L0x4 / C-L2x4 volume arms (§5.8)
 E2_COUNT_FAMILIES = {"stop_sign": (-2, -1, 1, 2), "clock_numerals": (-1, -2, -3)}  # §5.2 Δ per family
-STEPS = ["shared", "e1", "t0", "e2"]
+T2_COLOR_PAIRS = 500
+STEPS = ["shared", "e1", "t0", "e2", "l2"]
 
 
 def workers():
@@ -43,15 +43,17 @@ def split_evenly(total, k):
 def run_jobs(jobs, out_dir, step):
     """Run jobs in parallel; write records.jsonl (appending other datasets already in out_dir is the caller's job)."""
     t = time.time()
-    records, retries = [], Counter()
+    records, retries, dropped = [], Counter(), Counter()
     with ProcessPoolExecutor(workers()) as ex:
-        for recs, attempts, _ in tqdm(ex.map(run_job, jobs, chunksize=8), total=len(jobs), desc=step,
-                                      unit="item", smoothing=0.05):
+        for job, (recs, attempts, err) in zip(jobs, tqdm(ex.map(run_job, jobs, chunksize=8), total=len(jobs), desc=step,
+                                                          unit="item", smoothing=0.05)):
             records += recs
-            retries[recs[0]["render"]["generator"]] += attempts
+            retries[job["generator"]] += attempts
+            if not recs:
+                dropped[err.split(" (")[0][:60]] += 1
     records.sort(key=lambda r: (r["dataset"], r["pool_index"], r["id"]))
     return records, {"jobs": len(jobs), "images": len(records), "seconds": round(time.time() - t, 1),
-                     "retries_by_generator": dict(retries)}
+                     "retries_by_generator": dict(retries), "dropped_items": dict(dropped)}
 
 
 def write_pool(out_dir, records, step, stats):
@@ -153,26 +155,52 @@ def build_t0():
         jobs += [pair_job(fam, fam, "t0_count", "tests/T0/count", i) for i in range(n)]
     recs, s = run_jobs(jobs, "tests/T0/count", "t0_count")
     write_pool("tests/T0/count", recs, "t0_count", s)
-    from .build_color import t0_color_jobs
-    recs, s = run_jobs(t0_color_jobs(T0_COLOR_PAIRS), "tests/T0/color", "t0_color")
-    write_pool("tests/T0/color", recs, "t0_color", s)
 
 
 def build_e2():
-    from .build_color import e2_color_jobs, e2_crowd_jobs
+    # Emoji were dropped as a source (2026-10-06): no L0 color or neutral crowds. Exp 2 color comes
+    # from real photos at L2 (`l2` step); L0 neutral count waits for real-photo crowds.
     n = load_params()["e2_matched_n"] * E2_VOLUME
-    conflict, s1 = run_jobs(e2_count_conflict_jobs(n), "e2/L0/count", "e2_count_conflict")
-    neutral, s2 = run_jobs(e2_crowd_jobs(conflict, n), "e2/L0/count", "e2_count_neutral")
-    write_pool("e2/L0/count", conflict + neutral, "e2_count", {"conflict": s1, "neutral": s2,
-               "retries_by_generator": {**s1["retries_by_generator"], **s2["retries_by_generator"]},
-               "seconds": s1["seconds"] + s2["seconds"]})
-    cc, s1 = run_jobs(e2_color_jobs(n, "conflict"), "e2/L0/color", "e2_color_conflict")
-    cn, s2 = run_jobs(e2_color_jobs(n, "neutral"), "e2/L0/color", "e2_color_neutral")
-    write_pool("e2/L0/color", cc + cn, "e2_color", {"conflict": s1, "neutral": s2,
-               "retries_by_generator": {**s1["retries_by_generator"], **s2["retries_by_generator"]},
-               "seconds": s1["seconds"] + s2["seconds"]})
+    conflict, s = run_jobs(e2_count_conflict_jobs(n), "e2/L0/count", "e2_count_conflict")
+    write_pool("e2/L0/count", conflict, "e2_count", s)
+
+
+def renumber(records):
+    """Contiguous pool_index per dataset after dropped photo items, so N-pair prefixes stay balanced."""
+    for ds in {r["dataset"] for r in records}:
+        old = sorted({r["pool_index"] for r in records if r["dataset"] == ds})
+        new = {o: i for i, o in enumerate(old)}
+        for r in records:
+            if r["dataset"] == ds:
+                r["pool_index"] = new[r["pool_index"]]
+    return records
+
+
+def build_l2(n_pairs=None, t2_pairs=None):
+    """L2 color from real photos (§5.5): conflict + neutral 4N pairs each, and T2 color."""
+    from . import coco
+    from . import photo_color as pc
+    from .colorsets import OUT as color_objects
+    if not (coco.DIR / "lvis_val.pkl").exists() or not color_objects.exists():
+        print("l2: skipped (photo sources missing: run `python -m datagen sources`)")
+        return
+    analyzed = pc.analyze_all(pc.candidates())
+    n = n_pairs or load_params()["e2_matched_n"] * E2_VOLUME
+    recs, stats = [], {}
+    for mode in ("conflict", "neutral"):
+        jobs, per_obj = pc.color_jobs(analyzed, f"e2_L2_color_{mode}", "e2/L2/color", mode, n, "train")
+        r, s = run_jobs(jobs, "e2/L2/color", f"e2_L2_color_{mode}")
+        recs += renumber(r)
+        stats[mode] = {**s, "usable_instances_per_object": per_obj,
+                       "unique_source_photos": len({x["source"]["image_id"] for x in r})}
+    write_pool("e2/L2/color", recs, "e2_L2_color", {**stats, "seconds": sum(v["seconds"] for v in stats.values()),
+               "retries_by_generator": {"photo_color": sum(v["retries_by_generator"].get("photo_color", 0) for v in stats.values())}})
+    jobs, per_obj = pc.color_jobs(analyzed, "t2_color", "tests/T2/color", "conflict", t2_pairs or T2_COLOR_PAIRS, "heldout")
+    r, s = run_jobs(jobs, "tests/T2/color", "t2_color")
+    write_pool("tests/T2/color", renumber(r), "t2_color", {**s, "usable_instances_per_object": per_obj,
+               "unique_source_photos": len({x["source"]["image_id"] for x in r})})
 
 
 def build(steps=None):
     for step in steps or STEPS:
-        {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2}[step]()
+        {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2}[step]()

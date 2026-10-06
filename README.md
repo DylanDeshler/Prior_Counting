@@ -6,13 +6,24 @@
 with `--records <data dir | pool dirs | records.jsonl>` (e.g. `--records data/preview`,
 `--records data/tests/T0/count --limit 400`). See its docstring.
 
-## Data generation (L0: Exp 1 + Exp 2 rendered level)
+## Data generation
 
-Implements `data_generation_spec.md` for everything rendered: record schema, seeding, compression,
-the 9 Exp 1 conflict families + neutral twins, shared range block, dice pool, synthetic validation,
-T0 (traffic lights, snowflakes, held-out color objects), Exp 2 L0 count (stop signs, numeral clocks,
-emoji crowds) and color (emoji recolor), exporters, and the §10.1/§10.2 checks. L1–L3, T1–T3 and the
-probe sets are not built yet.
+Implements `data_generation_spec.md` for:
+- **L0 (rendered):** record schema, seeding, compression, the 9 Exp 1 conflict families + neutral twins,
+  shared range block, dice pool, synthetic validation, T0 count (traffic lights, snowflakes), Exp 2 L0
+  count (stop signs, numeral clocks), exporters, and the §10.1/§10.2 checks.
+- **L2 color (real photos):** COCO 2017 / LVIS v1 photos chosen by the §5.5 rules, LVIS masks, CIELAB
+  recolor with L fixed and identity-recolor null edits, T2 color from held-out objects on reserved
+  photos, and the §9 leakage controls (POPE/ORIC image ids, pHash near-duplicates of eval images).
+  An object must read as one color over >= 70% of its surface (shadows and highlights discounted),
+  so "what color is the X?" has one answer.
+
+Emoji are not used (rejected as unrealistic, 2026-10-06), so there is no L0 color and no L0 neutral
+crowds. Not built yet: L1, L2 count, L3, T1/T3, probe sets.
+
+`sources` downloads (once): LVIS annotations (~0.4 GB), COCO annotations (0.25 GB), the Open Images box
+file (streamed, 2.3 GB), eval images for the pHash list, and later only the COCO photos actually used
+(roughly 5 GB in data/sources/coco/images).
 
 Rendering runs on CPU (all cores but two, so it can share the box with eval/training). The two
 model-based steps use vLLM with ~30% of GPU memory.
@@ -29,10 +40,10 @@ Full build:
 
 ```bash
 uv sync
-uv run python -m datagen sources      # VLMBias stats (sets U), Open Images backgrounds (streams a 2.3 GB csv),
-                                      # CoDa, Noto Emoji, LVIS/COCO names, Visual CounterFact names, color-name table
+uv run python -m datagen sources      # VLMBias stats (sets U), Open Images backgrounds, COCO/LVIS annotations,
+                                      # CoDa x LVIS color objects, eval-set exclusions + pHashes, color-name table
 uv run tools/check_length.py          # §3.5 length rule with both tokenizers (CPU); lowers U if needed
-uv run python -m datagen build        # all L0 pools -> data/{shared_range,e1,tests/T0,e2/L0}
+uv run python -m datagen build        # L0 pools + L2 color -> data/{shared_range,e1,tests/T0,e2/L0,e2/L2,tests/T2}
 uv run tools/point_format_probe.py    # §12: which point_2d convention Qwen3.5-4B emits (GPU)
 uv run tools/blind_check.py           # §10.2 blind solvability / §10.3 text-only leak (GPU)
 uv run python -m datagen export       # data/exports/<arm>/<model>/<format>/{train,val,train_rl}.jsonl
@@ -64,7 +75,7 @@ Two ways, both over SSH:
 
 Long steps (`sources`, `build`) should run inside tmux/screen so an SSH drop doesn't kill them.
 
-`build` takes step names to rebuild part of the data: `shared`, `e1`, `t0`, `e2`.
+`build` takes step names to rebuild part of the data: `shared`, `e1`, `t0`, `e2`, `l2`.
 Measured parameters (§12) live in `data/params.json`: shared-block upper bound U, the Qwen3.5
 point convention, and the Exp 2 matched N (1,024 until the L3 yield is known; the N-pair arms are
 prefixes of the 4N pools, so changing N only needs a re-export). Every command and tool takes `--data PATH` to choose where data is generated and read (default
