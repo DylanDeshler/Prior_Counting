@@ -201,6 +201,22 @@ def build_l2(n_pairs=None, t2_pairs=None):
                "unique_source_photos": len({x["source"]["image_id"] for x in r})})
 
 
+def preflight(steps):
+    """Fail fast, in the main process, with the data dir in the message (not deep inside a worker)."""
+    import os
+    from .common import DATA, SOURCES
+    print(f"Data directory: {DATA}")
+    rendered = [s for s in steps if s in ("shared", "e1", "t0", "e2")]
+    bg = SOURCES / "openimages_bg"
+    if rendered and os.environ.get("COUNTERPOINT_PREVIEW") != "1" and not any(bg.glob("*.jpg")):
+        raise SystemExit(f"No background photos in {bg}.\n"
+                         f"  If you built before with --data <dir>, pass the same --data again.\n"
+                         f"  Otherwise run `python -m datagen{' --data ' + str(DATA) if 'COUNTERPOINT_DATA' in os.environ else ''} sources` first.")
+    if rendered and load_params()["shared_block_max"] is None:
+        raise SystemExit(f"{DATA / 'params.json'} has no shared_block_max: run `python -m datagen sources` (same --data).")
+
+
 def build(steps=None):
+    preflight(steps or STEPS)
     for step in steps or STEPS:
         {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2}[step]()
