@@ -36,7 +36,15 @@ uv run python -m datagen preview
 uv run python -m datagen --data data/preview view     # or scp data/preview/reports.tar.gz
 ```
 
-Full build:
+Full build, all steps in order (sources, length check, build, point-format probe, export, blind check,
+checks, report; run it inside tmux):
+
+```bash
+uv sync
+uv run python -m datagen all
+```
+
+The same steps one at a time:
 
 ```bash
 uv sync
