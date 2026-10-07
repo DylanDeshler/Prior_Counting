@@ -3,7 +3,7 @@
     --data PATH          where data is generated and read (default: ./data; or $COUNTERPOINT_DATA)
 
     preview              small version of every pool + report in data/preview/ (look at examples)
-    sources              download inputs, build exclusion lists, set U (§12)
+    sources [refresh]    download inputs, build exclusion lists, set U (§12); skips what exists unless `refresh`
     build [steps...]     render datasets; steps: shared e1 t0 e2 l2 (default: all)
     export [e1|e2]       write training files (default: both)
     check                CI checks (§10.1) -> data/reports/ci_report.json
@@ -12,7 +12,8 @@
     view [port]          browser viewer on localhost (tunnel with ssh -L): browse/verify, blind audit (§10.3), stats
     report               static report bundle (stats, galleries, contact sheets, CI) -> data/reports.tar.gz
     all                  everything in order: sources, tools/check_length.py, build, tools/point_format_probe.py,
-                         export, tools/blind_check.py, check, report (GPU tools skipped without a GPU)
+                         export, tools/blind_check.py, check, report. Resumable: rerunning skips finished
+                         sources, build steps whose code + params are unchanged, and GPU tools already done.
 """
 
 import os
@@ -51,20 +52,25 @@ def run_all():
     the report is written even if a check fails, and the exit code reflects the checks."""
     import shutil
     gpu = shutil.which("nvidia-smi") is not None
-    for step in ("sources",):
-        main([step])
-    if run_tool("check_length.py"):  # may lower U; must precede the build
+    from .common import REPORTS
+    main(["sources"])                      # each source skipped if present
+    if run_tool("check_length.py"):        # fast; may lower U, so it must precede the build
         print("length check failed; stopping before the build")
         return 1
-    main(["build"])
-    if gpu:
-        if run_tool("point_format_probe.py"):  # sets the Qwen3.5 point convention used by the exports
-            print("WARNING: point-format probe failed; exporting with the configured convention")
-    else:
+    from .build import build
+    build(skip_up_to_date=True)            # steps whose code + params are unchanged are skipped
+    done = lambda name: (REPORTS / name).exists()
+    if not gpu:
         print("WARNING: no GPU found; skipping tools/point_format_probe.py and tools/blind_check.py")
+    elif done("point_format_probe.json"):
+        print("point-format probe: already done, skipped")
+    elif run_tool("point_format_probe.py"):  # sets the Qwen3.5 point convention used by the exports
+        print("WARNING: point-format probe failed; exporting with the configured convention (rerun `all` later)")
     main(["export"])
-    if gpu and run_tool("blind_check.py"):
-        print("WARNING: blind check did not complete (see data/reports/blind_check.json if written)")
+    if gpu and done("blind_check.json"):
+        print("blind check: already done, skipped")
+    elif gpu and run_tool("blind_check.py"):
+        print("WARNING: blind check did not complete (rerun `all` when the GPU is free)")
     rc = main(["check"])
     main(["report"])
     return rc
@@ -77,7 +83,7 @@ def main(argv):
     cmd, rest = argv[0], argv[1:]
     if cmd == "sources":
         from .sources import fetch_all
-        fetch_all()
+        fetch_all(refresh="refresh" in rest)
     elif cmd == "build":
         from .build import build
         build(rest or None)

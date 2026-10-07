@@ -44,6 +44,11 @@ uv sync
 uv run python -m datagen all
 ```
 
+`all` is resumable: rerun it with the same `--data` after a failure (or after `git pull`) and it skips
+sources already downloaded, build steps whose generator code and parameters are unchanged (any code
+change rebuilds the affected data), and GPU tools that already produced their report. Export, checks
+and report always rerun. `sources refresh` forces re-downloads; `build <step>` always rebuilds.
+
 The same steps one at a time:
 
 ```bash

@@ -216,7 +216,37 @@ def preflight(steps):
         raise SystemExit(f"{DATA / 'params.json'} has no shared_block_max: run `python -m datagen sources` (same --data).")
 
 
-def build(steps=None):
+STEP_POOLS = {"shared": ["shared_range"], "e1": ["e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict",
+               "e1/val_neutral", "e1/val_shared"], "t0": ["tests/T0/count"], "e2": ["e2/L0/count"],
+               "l2": ["e2/L2/color", "tests/T2/color"]}
+
+
+def fingerprint(step):
+    """Hash of the generator code + the parameters a step depends on. If it is unchanged and the
+    step's pools exist, the step's output would be byte-identical, so it can be skipped."""
+    import hashlib
+    from pathlib import Path
+    h = hashlib.sha256()
+    for f in sorted(Path(__file__).parent.rglob("*.py")):
+        h.update(f.name.encode() + f.read_bytes())
+    p = load_params()
+    h.update(json.dumps([step, p["shared_block_max"], p["e2_matched_n"], E1_PAIRS, E1_VAL_IMAGES, SHARED_N,
+                         T0_COUNT_PAIRS, T2_COLOR_PAIRS]).encode())
+    return h.hexdigest()[:16]
+
+
+def up_to_date(step):
+    stamp = REPORTS / f"step_{step}.json"
+    return (stamp.exists() and json.loads(stamp.read_text()).get("fingerprint") == fingerprint(step)
+            and all((DATA / pool / "records.jsonl").exists() for pool in STEP_POOLS[step]))
+
+
+def build(steps=None, skip_up_to_date=False):
     preflight(steps or STEPS)
     for step in steps or STEPS:
+        if skip_up_to_date and up_to_date(step):
+            print(f"{step}: up to date, skipped")
+            continue
         {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2}[step]()
+        REPORTS.mkdir(parents=True, exist_ok=True)
+        (REPORTS / f"step_{step}.json").write_text(json.dumps({"fingerprint": fingerprint(step)}))

@@ -105,7 +105,10 @@ def fetch_eval_phashes(pope_files):
     print(f"eval pHashes: {len(arr)} images")
 
 
-def fetch_all():
+def fetch_all(refresh=False):
+    if not refresh and (EXCLUSIONS / "coco_image_ids.json").exists() and (EXCLUSIONS / "eval_phash.npz").exists():
+        print("eval-set exclusions + pHashes: up to date")
+        return
     pope_files = fetch_coco_ids()
     fetch_eval_phashes(pope_files)
 

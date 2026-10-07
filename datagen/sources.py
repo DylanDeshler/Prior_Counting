@@ -27,8 +27,12 @@ VLMBIAS_EXCLUDED_TERMS = ["animal", "leg", "dog", "cat", "bird", "horse", "logo"
                           "chess", "xiangqi", "board", "go grid", "sudoku", "dice pattern", "tally", "grid pattern"]
 
 
-def fetch_openimages_backgrounds(n=N_BACKGROUNDS):
+def fetch_openimages_backgrounds(n=N_BACKGROUNDS, refresh=False):
     out = SOURCES / "openimages_bg"
+    manifest = SOURCES / "openimages_bg_manifest.json"
+    if not refresh and manifest.exists() and len(list(out.glob("*.jpg"))) >= len(json.loads(manifest.read_text())["image_ids"]):
+        print(f"Open Images backgrounds: up to date ({manifest})")
+        return
     out.mkdir(parents=True, exist_ok=True)
     classes = pd.read_csv(OI_CLASSES, header=None, names=["mid", "name"])
     excluded_mids = set(classes[classes["name"].isin(OI_EXCLUDED)]["mid"])
@@ -83,8 +87,12 @@ def fetch_openimages_backgrounds(n=N_BACKGROUNDS):
     print(f"Open Images backgrounds: {len(keep)} of {len(pool)} clean train images")
 
 
-def fetch_vlmbias_stats():
+def fetch_vlmbias_stats(refresh=False):
     """Shared-block upper bound U = max(40, largest VLMBias counting label) (§4.3, §12)."""
+    from .common import load_params
+    if not refresh and load_params().get("vlmbias_max_count") and (EXCLUSIONS / "vlmbias_categories.json").exists():
+        print("VLMBias stats: up to date")
+        return
     from datasets import load_dataset
     ds = load_dataset("anvo25/vlms-are-biased", split="main").remove_columns(["image"])
     counts = [int(g) for g, t in zip(ds["ground_truth"], ds["topic"]) if t != "Optical Illusion" and str(g).isdigit()]
@@ -98,12 +106,13 @@ def fetch_vlmbias_stats():
     print(f"VLMBias: {len(counts)} counting items, largest count {largest} -> U = {p['shared_block_max']}")
 
 
-def fetch_all():
-    fetch_vlmbias_stats()
-    fetch_openimages_backgrounds()
+def fetch_all(refresh=False):
+    """Each source is skipped if already present (pass refresh=True / `sources refresh` to redo)."""
+    fetch_vlmbias_stats(refresh)
+    fetch_openimages_backgrounds(refresh=refresh)
     # Photo levels (L2 color): COCO/LVIS annotations, CoDa x LVIS color objects, eval-set exclusions.
     from . import coco, colornames, colorsets, exclusions
     colornames.fetch()
     coco.fetch_all()
     colorsets.fetch()
-    exclusions.fetch_all()
+    exclusions.fetch_all(refresh)
