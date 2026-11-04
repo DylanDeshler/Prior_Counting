@@ -129,6 +129,10 @@ def summarize(records):
         groups[("overall", "")].append(r)
         groups[("topic", r["topic"])].append(r)
         groups[("sub_topic", r["sub_topic"])].append(r)
+        if r["topic"] != "Optical Illusion":  # VLMBias primary outcome: the 1,992 counting items
+            groups[("counting", "")].append(r)
+        if " · " in r["sub_topic"]:  # generated data: canonical / counterfactual / neutral ... pooled
+            groups[("role", r["sub_topic"].rsplit(" · ", 1)[-1])].append(r)
 
     def stats(rs):
         n = len(rs)
@@ -142,11 +146,15 @@ def summarize(records):
             "truncated": sum(r.get("truncated", False) for r in rs) / n,
         }
 
-    return {
+    out = {
         "overall": stats(groups[("overall", "")]),
+        "by_role": {k: stats(v) for (lvl, k), v in sorted(groups.items()) if lvl == "role"},
         "by_topic": {k: stats(v) for (lvl, k), v in sorted(groups.items()) if lvl == "topic"},
         "by_sub_topic": {k: stats(v) for (lvl, k), v in sorted(groups.items()) if lvl == "sub_topic"},
     }
+    if len(groups[("counting", "")]) < len(records):  # illusions present (VLMBias main)
+        out["counting"] = stats(groups[("counting", "")])
+    return out
 
 
 def print_summary(name, summary):
@@ -158,6 +166,12 @@ def print_summary(name, summary):
     print(f"\n=== {name}")
     print(f"{'':<52} {'n':>6} {'acc%':>8} {'bias%':>8} {'unpars%':>8} {'trunc%':>8}")
     row("OVERALL", summary["overall"])
+    if "counting" in summary:
+        row("COUNTING ONLY (no optical illusions)", summary["counting"])
+    if summary.get("by_role"):
+        print("-- by role (pooled over pools)")
+        for k, s in summary["by_role"].items():
+            row(k, s)
     print("-- by topic")
     for k, s in summary["by_topic"].items():
         row(k, s)
@@ -479,6 +493,16 @@ def load_generated(paths, limit):
     return Dataset.from_list(rows).cast_column("image", Image())
 
 
+def model_name(model):
+    """Short name for result files. Local checkpoints (e.g. runs/c-count-s0/v0-.../checkpoint-512-merged)
+    are named after their run directory so different arms never overwrite each other."""
+    p = Path(model.rstrip("/"))
+    if p.exists() and p.name.startswith("checkpoint"):
+        run = p.parent.parent.name if p.parent.name.startswith("v") and p.parent.parent.name else p.parent.name
+        return f"{run}-{p.name.replace('checkpoint-', 'ckpt')}"
+    return p.name
+
+
 def load_done(path):
     done = {}
     if path.exists():
@@ -499,7 +523,8 @@ def main():
 
     if args.records:
         ds = load_generated(args.records, args.limit)
-        data_tag = "gen-" + "+".join(p.resolve().name for p in args.records)[:60]
+        # Last two path parts keep tags distinct: tests/T0/count -> T0-count, e2/L0/count -> L0-count.
+        data_tag = "gen-" + "+".join("-".join(p.resolve().parts[-2:]) for p in args.records)[:80]
     else:
         ds = load_dataset(DATASET_ID, split=args.split)
         if args.limit:
@@ -509,7 +534,7 @@ def main():
     meta_cols = ["ID", "topic", "sub_topic", "type_of_question", "pixel", "prompt", "ground_truth", "expected_bias"]
 
     mode = "think" if args.thinking else "nothink"
-    base_name = args.model.rstrip("/").split("/")[-1]
+    base_name = model_name(args.model)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # Build names by string concat: Path.with_suffix would treat ".5-4B..." in "Qwen3.5-4B" as a suffix.
     stems = {v: f"{base_name if v is None else base_name + '+' + v}_{data_tag}_{mode}" for v in variants}

@@ -39,12 +39,24 @@ def take_data_arg(argv):
 
 
 def run_tool(name):
-    """Run a tools/ script in its own uv environment (transformers / vLLM) on the same data dir."""
+    """Run a tools/ script in its own uv environment (transformers / vLLM) on the same data dir. Output
+    goes to the terminal and to <data>/reports/logs/<tool>.log, so errors can be read after scrolling."""
     import subprocess
-    from .common import DATA
+    from .common import REPORTS, DATA
     script = Path(__file__).resolve().parent.parent / "tools" / name
-    print(f"\n=== tools/{name}")
-    return subprocess.run(["uv", "run", str(script), "--data", str(DATA)]).returncode
+    log = REPORTS / "logs" / f"{Path(name).stem}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    print(f"\n=== tools/{name}  (log: {log})")
+    with log.open("w") as f:
+        proc = subprocess.Popen(["uv", "run", str(script), "--data", str(DATA)], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            f.write(line)
+        rc = proc.wait()
+    if rc:
+        print(f"tools/{name} failed (exit {rc}); full log: {log}")
+    return rc
 
 
 def run_all():
