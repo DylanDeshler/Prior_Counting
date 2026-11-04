@@ -1,6 +1,6 @@
 # counterpoint-vlm: progress report and one-week experiment plan
 
-*Status as of 2026-11-02. Companion to `data_generation_spec.md`, `vlm_prior_counting_design.md` and the proposal.*
+*Status as of 2026-11-04 (baseline done). Companion to `data_generation_spec.md`, `vlm_prior_counting_design.md` and the proposal.*
 
 ## 1. Summary
 
@@ -17,6 +17,10 @@ from its prior ("4", "6"). Which synthetic fine-tuning data fixes this?
   - Study 2 at L0 (count) and L2 (color, real photos), with T2 color.
   - Automated QA, a viewer, and a static report.
 - **Last full build:** 45,690 records and 246,608 export rows; every CI check passes.
+
+**Baseline (Nov 4):** VLMBias counting accuracy 12.7% / bias 73.4% against 85.9% on unedited images,
+so Gate 0 passes. T0 count conflict dose is 42%. Real-photo color shows no bias (1%), so color can't
+show a bias fix for this model (§3.1).
 
 **Not done:** no LoRA has been trained yet. The training and eval scripts are written but untested (§6.3).
 Two GPU-based data checks haven't run because the shared GPU was busy.
@@ -119,24 +123,67 @@ Qwen2.5-VL points use pixels.
 
 ## 3. Results so far
 
-### 3.1 Base model on VLMBias (Qwen3.5-4B, greedy, thinking off, Oct 4)
+### 3.1 Baseline: Qwen3.5-4B on the core suite (2026-11-04, greedy, thinking off)
 
-| | n | acc % | bias % |
+| Set | n | Canonical acc | Counterfactual acc | Bias rate |
+|---|---|---|---|---|
+| **VLMBias counting (primary)** | 1,992 cf / 326 canonical | **85.9** (`original` split) | **12.7** | **73.4** |
+| T0 count: snowflake | 500 + 500 | 100.0 | 20.4 | 79.4 |
+| T0 count: traffic light | 500 + 500 | 99.6 | 74.2 | 5.4 |
+| T0 count: pooled | 1,000 + 1,000 | 99.8 | 47.3 | 42.4 |
+| T2 color (real photos) | 291 + 291 | 95.5 | 95.2 | 1.0 |
+| Synthetic val, conflict pairs | 512 + 512 | 84.6 | 38.3 | 37.7 |
+| Synthetic val, shared block (12–51 shapes) | 1,024 neutral | 8.9 (all items) | | |
+
+Balanced accuracy on VLMBias (mean of counterfactual and canonical accuracy) is 49.3.
+
+| VLMBias topic | acc % | bias % |
+|---|---|---|
+| Animals (generative edit, "L3-like") | 0.0 | 99.3 |
+| Logos (generative edit, "L3-like") | 2.4 | 94.0 |
+| Flags | 18.3 | 68.3 |
+| Chess pieces | 20.8 | 53.5 |
+| Game boards | 32.7 | 39.9 |
+| Patterned grids | 24.7 | 43.8 |
+
+| Synthetic val family | canonical | counterfactual | bias |
 |---|---|---|---|
-| **Counting items (primary)** | 1,992 | **10.8** | **72.7** |
-| All items incl. optical illusions | 2,784 | 23.3 | 64.6 |
-| Animals | 546 | 0.0 | 99.3 |
-| Logos | 414 | 2.2 | 94.7 |
-| Flags | 240 | 18.3 | 67.1 |
-| Chess pieces | 288 | 12.5 | 49.0 |
-| Game boards | 168 | 28.6 | 39.9 |
-| Patterned grids | 336 | 23.5 | 43.5 |
-| Optical illusions (yes/no, chance 50%) | 792 | 54.7 | 43.9 |
+| clock | 100.0 | 0.0 | 100.0 |
+| stop sign | 100.0 | 5.3 | 87.7 |
+| star | 100.0 | 43.9 | 26.3 |
+| piano | 78.9 | 50.9 | 35.1 |
+| calendar | 59.6 | 15.8 | 29.8 |
+| playing card | 42.1 | 22.8 | 21.1 |
+| domino | 87.7 | 56.1 | 10.5 |
+| rubik | 92.9 | 76.8 | 19.6 |
+| die | 100.0 | 73.7 | 8.8 |
 
-The counting-only row is derived from the per-topic numbers. That run capped generation at 1,024 tokens
-(about 3% truncated), so rerun it with the standard suite (§6.2) for the final baseline. Gate 0's first
-half passes: counterfactual accuracy is ≤ 30%. Canonical accuracy, from the `original` split, is the
-other half.
+**What it means.**
+- **Gate 0 passes clearly.** Counterfactual accuracy is 12.7% (≤ 30%) and canonical accuracy 85.9%: a
+  73-point gap. The failure is prior override, not perception, and there is plenty of headroom.
+- **The bias is strongest on generative-edit images.** Animals and logos sit at 0–2% accuracy; the
+  programmatic categories at 18–33%.
+- **Gate 5 (conflict dose):**
+  - *T0 count:* 42% pooled, so it counts as a conflict test. Within it, snowflakes are strong conflict
+    (79%) but traffic lights are not (5%, below the 30% bar), so report traffic lights as a skill test.
+  - *T2 color:* 1% bias. **Qwen3.5-4B shows essentially no color prior override on real-photo recolors**,
+    so T2 color measures color naming, not prior override, and color arms cannot show a bias reduction for
+    this model. This is a result in itself, consistent with the L0 emoji finding.
+- **The rendered conflict families split three ways.**
+  - *Strong-prior families* behave like VLMBias: clock and stop sign at 88–100% bias, star and piano
+    moderate.
+  - *Variable-prior families* show little bias (die, domino, rubik).
+  - *Cards and calendars* improved after the size fix (canonical 0% → 42%, 38% → 60%) but are still
+    partly skill-limited, so report them as such.
+- **Gate 2 needs reading per pool.** The base model is at 61% on conflict validation and 9% on the shared
+  block. The block's accuracy collapses above about 20 shapes (23% for 12–21, 3% for 32–51), so ≥ 95% on
+  the shared block is unrealistic after 2 epochs. Judge Gate 2 on the conflict pool and report the shared
+  block separately.
+- **Small caveat:** the VLMBias main numbers re-scored the Oct 5 predictions (no token cap) instead of
+  regenerating at 4,096. For exact comparability with the arms, rerun once:
+  `uv run run_vlms_are_biased.py --max-new-tokens 4096 --rerun` (about 6 min).
+
+The October numbers (1,024-token cap, before the parser fix) were 10.8% / 72.7% on counting items.
 
 ### 3.2 Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
@@ -195,12 +242,12 @@ Ordered so that every day ends with something showable, and later days build on 
 | Day | Experiment | Commands (§6) | GPU time | Output to show |
 |---|---|---|---|---|
 | 1 | **E0a. Finish data QA**: point-format probe, blind check | `datagen all` (resumes; only GPU tools run) | 0.5 h | `reports/blind_check.json`, `point_format_probe.json`, data report tarball |
-| 1 | **E0b. Base-model baseline / Gate 0** on the core suite: VLMBias main + `original`, T0 count, T2 color, synthetic val | `tools/eval_suite.sh /data/vlm` | 0.6 h | Baseline row of `results/RESULTS.md`; per-family conflict dose on T0/T2 (Gate 5) |
+| 1 | ~~E0b. Base-model baseline / Gate 0~~ **done 11-04** (§3.1) | `tools/eval_suite.sh /data/vlm` | 0.6 h | Baseline row of `results/RESULTS.md`; Gate 0 pass; conflict dose T0 42%, T2 color 1% |
 | 1 (overnight) | E0c. *Optional:* thinking-mode baseline on VLMBias main | `run_vlms_are_biased.py --thinking --max-new-tokens 16384` | 2–3 h | Does reasoning fix prior override for free? |
 | 2 | **E1-pilot / Gate 2**: train C-count seed 0, check in-distribution val ≥ 95% | `tools/train_arm.sh /data/vlm conflict-count number 0` | 1.5 h | Training works (or not); first trained row |
 | 3 | **E1 core 2×2, seed 0**: N-count, N-point, C-point (C-count done on day 2) | `train_arm.sh … neutral-count number 0`, `… neutral-point points 0`, `… conflict-point points 0` | 5 h | Contrasts 1–3 of the design doc |
 | 4 | **E1 controls, seed 0**: N-enum, C-blind, B-count | `… neutral-list list 0`, `… conflict-blind number 0`, `… dice-only number 0` | 3.5 h | Contrast 4 (coordinates vs enumeration), Gate 3 (shortcut), narrow vs broad |
-| 5 | **E2 color pilot, seed 0**: C-L2 vs N-L2 (real-photo color) | `… C-L2 number 0`, `… N-L2 number 0` | 2.5 h | Does conflict color data move T2 color bias? |
+| 5 | **E2 count pilot, seed 0**: C-L0 (stop signs + numeral clocks, the two highest-dose families) | `… C-L0 number 0` | 1.5 h | Does narrow anchor-family conflict data transfer to VLMBias / T0? (The color pilot was dropped: base color bias is 1%, so there is nothing to fix; see §3.1.) |
 | 5–6 (overnight) | **Seeds 1 (and 2)** for the core 2×2 | same as day 3 with seed 1, 2 | 6–12 h | Error bars |
 | 6 | E1 conditional: N-randpoint, only if N-point > N-enum | `… neutral-randpoint randpoints 0` | 1.5 h | Do correct point locations matter? |
 | 7 | **Write-up** | `uv run tools/summarize_results.py results`; data report | none | Tables + figures below |
@@ -241,7 +288,8 @@ Per-category differences under about 10 points are noise (game boards has only 1
 3. **Gates:** Gate 0 (headroom), Gate 2 (training works), Gate 3 (shortcut check), Gate 5 (conflict dose
    per test set).
 4. **The 2×2:** the `RESULTS.md` table and the four contrasts, plus controls.
-5. **Study 2 first look:** C-L2 vs N-L2 on T2 color.
+5. **Study 2 first look:** the real-photo color data and the finding that Qwen3.5-4B has no color prior
+   override (T2 bias 1%), plus the C-L0 anchor-family arm.
 6. **Honest negatives and deviations:** §2.3 and §4.
 
 ---
@@ -273,7 +321,18 @@ uv run python -m datagen --data /data/vlm all      # resumable: skips finished s
 tools/eval_suite.sh /data/vlm                       # base model
 tools/eval_suite.sh /data/vlm runs/<arm>/v*/checkpoint-*-merged   # a trained arm (train_arm.sh calls this)
 uv run tools/summarize_results.py results           # -> results/RESULTS.md
+uv run python tools/results_report.py --data /data/vlm   # plots + result-driven samples -> results/report.tar.gz
 ```
+`results_report.py` writes, per model:
+- **Plots:** VLMBias accuracy vs bias by topic; canonical vs counterfactual accuracy per family; where
+  counterfactual answers land (correct / familiar / other); answer offsets; shared-block accuracy vs
+  count; color confusion; and a model comparison.
+- **Sample cards,** grouped by outcome: prior override, correct counterfactual, other error, canonical
+  failure, unparsed, shared-block miss, VLMBias bias-aligned. Each card shows canonical | counterfactual |
+  pixel diff of the edit, with ground-truth points, the model's answers and the end of its reply.
+
+It warns if a results file is older than the data it's matched to, since the sample images could then
+differ from what the model saw. Copy it with `scp <host>:<repo>/results/report.tar.gz .`.
 - **The suite:** VLMBias main, VLMBias `original` (guardrail), T0 count, T2 color, and synthetic
   validation. All runs use greedy decoding, thinking off, and the same 4,096-token cap.
 - **Knobs:** `EVAL_GPU_UTIL=0.5` when the GPU is shared; `EVAL_MAX_TOKENS` changes the cap.
@@ -298,7 +357,8 @@ tools/train_arm.sh /data/vlm <arm> <format> <seed>  # e.g. conflict-count number
   batch at 32); `SKIP_EVAL=1`.
 - **Untested:** this is the first run of this stack. If ms-swift rejects a flag, check
   `swift sft --help` for 4.6 and adjust in `tools/train_arm.sh`.
-  - **Gate 2 pass:** synthetic val accuracy ≥ 95% (the "Val acc" column in `RESULTS.md`).
+  - **Gate 2 pass:** synthetic val accuracy ≥ 95% on conflict pairs (the "Val conflict" column in
+    `RESULTS.md`); the shared block is reported separately (base 9%).
   - **Gate 2 fail:** fix training before looking at any VLMBias number.
 
 ### 6.4 Pipeline reference
