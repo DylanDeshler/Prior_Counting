@@ -356,18 +356,36 @@ def single_samples(preds, recs, data, out, n, title, filt):
     return [(title, cards)] if cards else []
 
 
+def vlmbias_image_key(item_id):
+    """VLMBias has each image 6 times: phrasing Q1/Q2 x resolution 384/768/1152 px."""
+    return re.sub(r"_Q\d", "", re.sub(r"_px\d+$", "", item_id))
+
+
 def vlmbias_samples(preds, out, n_per, split):
+    """One card per image (not per item); the caption summarizes the model over its 6 versions."""
     rows = [p for p in preds if p["topic"] != "Optical Illusion"]
+    by_img = defaultdict(list)
+    for p in rows:
+        by_img[(p["topic"], vlmbias_image_key(p["ID"]))].append(p)
     pick = []
     for t in sorted({p["topic"] for p in rows}):
-        pool = [p for p in rows if p["topic"] == t]
-        pick += [p for p in pool if p["bias_aligned"]][:n_per] + [p for p in pool if p["correct"]][: max(1, n_per // 2)]
-    imgs = vlmbias_images([p["ID"] for p in pick], split)
+        imgs_t = sorted((k for k in by_img if k[0] == t), key=lambda k: k[1])
+        biased = [k for k in imgs_t if sum(p["bias_aligned"] for p in by_img[k]) > len(by_img[k]) / 2]
+        right = [k for k in imgs_t if sum(p["correct"] for p in by_img[k]) > len(by_img[k]) / 2]
+        pick += biased[:n_per] + right[: max(1, n_per // 2)]
+    reps = {k: max(by_img[k], key=lambda p: p.get("pixel", 0)) for k in pick}  # show the largest version
+    imgs = vlmbias_images([p["ID"] for p in reps.values()], split)
     cards = []
-    for p in pick:
+    for k in pick:
+        p, items = reps[k], sorted(by_img[k], key=lambda p: p["ID"])
         cells = [(thumb(imgs[p["ID"]], name=f"vlmbias_{p['ID']}.jpg", out=out), p["topic"])] if p["ID"] in imgs else []
-        cards.append(card(cells, f"<b>{html.escape(p['topic'])}</b> · {html.escape(p['prompt'][:110])}"
-                                 f"<br>familiar {html.escape(str(p['expected_bias']))} · {pred_line(p)}"))
+        versions = ", ".join(f"{re.search(r'_(Q\d)', q['ID']).group(1) if re.search(r'_(Q\d)', q['ID']) else ''}"
+                             f"@{q.get('pixel', '?')}px: {html.escape(q['pred'] or '—')}" for q in items)
+        n_bias, n_ok = sum(q["bias_aligned"] for q in items), sum(q["correct"] for q in items)
+        cards.append(card(cells, f"<b>{html.escape(p['topic'])}</b> · {html.escape(vlmbias_image_key(p['ID']))} · "
+                                 f"truth {html.escape(p['ground_truth'])} · familiar {html.escape(str(p['expected_bias']))}"
+                                 f"<br>correct {n_ok}/{len(items)}, familiar answer {n_bias}/{len(items)} versions "
+                                 f"(<span class=resp>{versions}</span>)<br>{pred_line(p)}"))
     return [(f"VLMBias ({split}): bias-aligned failures and some correct answers, per topic", cards)] if cards else []
 
 
@@ -406,11 +424,18 @@ def main():
     ap.add_argument("--out", default=None, type=Path, help="default: <results>/report")
     ap.add_argument("--models", nargs="*", help="only these models (default: all found)")
     ap.add_argument("--per-family", type=int, default=3, help="sample cards per family and outcome")
+    ap.add_argument("--include-preview", action="store_true",
+                    help="also report gen-preview results (only meaningful with --data pointing at that preview dir)")
     args = ap.parse_args()
     out = args.out or args.results / "report"
     (out / "img").mkdir(parents=True, exist_ok=True)
 
     preds = load_predictions(args.results)
+    if not args.include_preview:  # preview items reuse full-data ids, so they'd be matched to the wrong images
+        for m in preds:
+            for tag in [t for t in preds[m] if "preview" in t]:
+                print(f"skipping {m} {tag} (preview eval; pass --include-preview to show it)")
+                del preds[m][tag]
     if args.models:
         preds = {m: v for m, v in preds.items() if m in args.models}
     if not preds:
