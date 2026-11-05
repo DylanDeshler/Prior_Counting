@@ -22,9 +22,20 @@ BATCH=${BATCH:-4}; ACCUM=$(( (32 + BATCH - 1) / BATCH ))
 [[ -f "$EXP/train.jsonl" ]] || { echo "missing $EXP/train.jsonl (run: python -m datagen --data $DATA export)"; exit 1; }
 VAL=(--eval_strategy no); [[ -f "$EXP/val.jsonl" ]] && VAL=(--val_dataset "$EXP/val.jsonl" --eval_strategy epoch)
 
-# ms-swift in its own environment (Qwen3.5 needs transformers>=5.9; fla kernels need Python 3.12).
-SWIFT=(uv run --no-project --python 3.12 --with "ms-swift>=4.6" --with "transformers>=5.9" --with "qwen_vl_utils>=0.0.14"
-       --with flash-linear-attention --with torchvision --with "peft>=0.17" swift)
+# ms-swift in its own isolated venv on a uv-managed Python 3.12 (Qwen3.5 needs transformers>=5.9; fla kernels
+# need 3.12). Not `uv run --with` on the system Python: that layers onto the interpreter's own site-packages,
+# and Ubuntu's system pyOpenSSL/boto3 then break the transformers import. Rebuilt when the requirements change.
+SWIFT_ENV=${SWIFT_ENV:-.venv-swift}
+SWIFT_REQS=("ms-swift>=4.6" "transformers>=5.9" "qwen_vl_utils>=0.0.14" "flash-linear-attention" "torchvision" "peft>=0.17")
+if [[ ! -x "$SWIFT_ENV/bin/swift" || "$(cat "$SWIFT_ENV/.reqs" 2>/dev/null)" != "${SWIFT_REQS[*]}" ]]; then
+  echo "setting up the ms-swift environment in $SWIFT_ENV (first run only)"
+  rm -rf "$SWIFT_ENV"
+  uv venv "$SWIFT_ENV" --python 3.12 --managed-python
+  uv pip install --python "$SWIFT_ENV/bin/python" --torch-backend auto "${SWIFT_REQS[@]}"
+  echo "${SWIFT_REQS[*]}" > "$SWIFT_ENV/.reqs"
+fi
+export PYTHONNOUSERSITE=1  # no ~/.local packages either
+SWIFT=("$SWIFT_ENV/bin/swift")
 
 # The most advanced complete checkpoint across run versions (a resumed run writes into a new v* dir):
 # prints "<path> <global_step> <max_steps>", or "none 0 0" if there is none.

@@ -3,3 +3,5 @@ results/
 __pycache__/
 .venv/
 *.pyc
+.venv-swift/
+runs/
