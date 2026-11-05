@@ -1,6 +1,6 @@
 # counterpoint-vlm: progress report and one-week experiment plan
 
-*Status as of 2026-11-04 (baseline done). Companion to `data_generation_spec.md`, `vlm_prior_counting_design.md` and the proposal.*
+*Status as of 2026-11-05 (baseline, pointing baseline and first trained arm done). Companion to `data_generation_spec.md`, `vlm_prior_counting_design.md` and the proposal.*
 
 ## 1. Summary
 
@@ -18,7 +18,7 @@ from its prior ("4", "6"). Which synthetic fine-tuning data fixes this?
   - Automated QA, a viewer, and a static report.
 - **Last full build:** 45,690 records and 246,608 export rows; every CI check passes.
 
-**Baseline (Nov 4):** VLMBias counting accuracy 12.7% / bias 73.4% against 85.9% on unedited images,
+**Baseline (Nov 4):** VLMBias counting accuracy 12.7% / bias 73.4% against 96.9% on unedited images,
 so Gate 0 passes. T0 count conflict dose is 42%. Real-photo color shows no bias (1%), so color can't
 show a bias fix for this model (§3.1).
 
@@ -127,7 +127,7 @@ Qwen2.5-VL points use pixels.
 
 | Set | n | Canonical acc | Counterfactual acc | Bias rate |
 |---|---|---|---|---|
-| **VLMBias counting (primary)** | 1,992 cf / 326 canonical | **85.9** (`original` split) | **12.7** | **73.4** |
+| **VLMBias counting (primary)** | 1,992 cf / 163 canonical | **96.9** (`original` split, counting questions) | **12.7** | **73.4** |
 | T0 count: snowflake | 500 + 500 | 100.0 | 20.4 | 79.4 |
 | T0 count: traffic light | 500 + 500 | 99.6 | 74.2 | 5.4 |
 | T0 count: pooled | 1,000 + 1,000 | 99.8 | 47.3 | 42.4 |
@@ -135,7 +135,10 @@ Qwen2.5-VL points use pixels.
 | Synthetic val, conflict pairs | 512 + 512 | 84.6 | 38.3 | 37.7 |
 | Synthetic val, shared block (12–51 shapes) | 1,024 neutral | 8.9 (all items) | | |
 
-Balanced accuracy on VLMBias (mean of counterfactual and canonical accuracy) is 49.3.
+Balanced accuracy on VLMBias (mean of counterfactual and canonical accuracy) is 54.8.
+
+*Corrected 11-05:* the canonical number was first reported as 85.9% because the `original` split also
+contains identification questions ("which flag is this?"). Counting questions only, it is 96.9%.
 
 | VLMBias topic | acc % | bias % |
 |---|---|---|
@@ -159,8 +162,8 @@ Balanced accuracy on VLMBias (mean of counterfactual and canonical accuracy) is 
 | die | 100.0 | 73.7 | 8.8 |
 
 **What it means.**
-- **Gate 0 passes clearly.** Counterfactual accuracy is 12.7% (≤ 30%) and canonical accuracy 85.9%: a
-  73-point gap. The failure is prior override, not perception, and there is plenty of headroom.
+- **Gate 0 passes clearly.** Counterfactual accuracy is 12.7% (≤ 30%) and canonical accuracy 96.9%: an
+  84-point gap. The failure is prior override, not perception, and there is plenty of headroom.
 - **The bias is strongest on generative-edit images.** Animals and logos sit at 0–2% accuracy; the
   programmatic categories at 18–33%.
 - **Gate 5 (conflict dose):**
@@ -185,7 +188,54 @@ Balanced accuracy on VLMBias (mean of counterfactual and canonical accuracy) is 
 
 The October numbers (1,024-token cap, before the parser fix) were 10.8% / 72.7% on counting items.
 
-### 3.2 Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
+### 3.2 Stage 2 (2026-11-05): pointing-prompt baseline and the C-count pilot
+
+| Model | VLMBias cnt acc | bias | Canonical (orig) | Balanced | T0 can | T0 cf | T0 bias | Val conflict | Val shared |
+|---|---|---|---|---|---|---|---|---|---|
+| Base | 12.7 | 73.4 | 96.9 | 54.8 | 99.8 | 47.3 | 42.4 | 61.4 | 8.9 |
+| Base + pointing prompt, **point-list length** | 37.2 | 27.1 | 81.0 | **59.1** | 77.8 | 63.3 | 10.8 | 49.3* | 21.7 |
+| **C-count pilot** (seed 0) | **20.6** | **56.6** | 92.0 | 56.3 | 99.1 | **75.7** | **12.6** | 93.1 | 31.2 |
+
+\*Val conflict for pointing is the mean of canonical 59.8 and counterfactual 44.7.
+
+**Pointing prompt (Gate 1).**
+- **Readout:** the model points 99% of the time but usually never states a total (72–96% of replies), so
+  the point-list length is the answer. The stated-total column in `RESULTS.md` (6.9%) only counts the
+  replies where it did.
+- **Large effect on prior override:** list-length accuracy is 37.2% vs 12.7% plain (+24.5, above Gate 1's
+  +20 bar), and the bias rate falls from 73.4% to 27.1%.
+- **By topic:** animals go from 0.0% to 73.4%; flags from 18.3% to 58.8%. Dense layouts don't benefit:
+  chess 13.9%, game boards 15.5%, grids 14.3%, logos 20.8%.
+- **Cost on unedited images:** 96.9% → 81.0% canonical (T0 canonical 99.8% → 77.8%).
+- **Net:** balanced accuracy 59.1, **higher than the trained pilot (56.3)**. T0 point F1 is 47.4%.
+- **Consequence (design doc Gate 1):** the trained point arms must be compared against the
+  prompted-pointing base, not the plain base. It also makes the distillation question (§5.0) concrete:
+  can a plain answer match the pointed one?
+
+**C-count pilot.**
+- **Training:** loss 2.00 → 0.04. Eval loss was 0.20 after epoch 1 and 0.16 after epoch 2, still falling.
+- **VLMBias:** +7.9 points accuracy (12.7 → 20.6) and −16.8 bias (73.4 → 56.6). Paired over the 1,992
+  items it fixed 290 and broke 132, net +158 (sign test, p ≪ 0.001).
+  - *Gains:* animals 0.0 → 12.6, logos 2.4 → 23.4, flags 18.3 → 34.2, game boards 32.7 → 45.2.
+  - *Losses:* chess 20.8 → 6.9, grids 24.7 → 19.6.
+- **Guardrail:** canonical 96.9 → 92.0 (−4.9, just inside the 5-point validity rule), so balanced
+  accuracy rises only +1.5 (54.8 → 56.3). Part of the gain could be a learned push away from the familiar
+  answer. **C-blind (Gate 3) decides this and is the next priority.**
+- **Held-out rendered families (T0) transfer well:**
+  - Snowflake counterfactual 20.4 → 53.8 (bias 79.4 → 25.0).
+  - Traffic light counterfactual 74.2 → 97.6.
+  - Canonicals unchanged (99).
+- **Gate 2: 93.1%, so a formal FAIL (−1.9).** It isn't a training failure. Every family is ≥ 84% except
+  clock counterfactuals (24.6%), and those errors are now ±1 off (15→14, 13→12, 11→12), not the familiar
+  12. The clock's evenly spaced hour marks (9–15) have become a counting-precision problem. A third
+  epoch would probably pass, but then the protocol differs between arms. Recommendation: keep 2 epochs
+  and report clock as the outlier.
+
+**Measurement fixes made while reading these results** (applied to all models by `tools/rescore_results.py`):
+- JSON point objects are no longer taken as answers.
+- "Counting" means numeric-answer questions only.
+
+### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
 - **Fixed-prior families reproduce the VLMBias pattern.**
 

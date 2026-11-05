@@ -165,7 +165,9 @@ def summarize(records):
         groups[("overall", "")].append(r)
         groups[("topic", r["topic"])].append(r)
         groups[("sub_topic", r["sub_topic"])].append(r)
-        if r["topic"] != "Optical Illusion":  # VLMBias primary outcome: the 1,992 counting items
+        if r["topic"] != "Optical Illusion" and str(r["ground_truth"]).strip().isdigit():
+            # VLMBias primary outcome: counting items only (main: 1,992; `original` also has identification
+            # questions like "which flag is this?", which are not counting)
             groups[("counting", "")].append(r)
         if " · " in r["sub_topic"]:  # generated data: canonical / counterfactual / neutral ... pooled
             groups[("role", r["sub_topic"].rsplit(" · ", 1)[-1])].append(r)
@@ -196,7 +198,7 @@ def summarize(records):
         "by_topic": {k: stats(v) for (lvl, k), v in sorted(groups.items()) if lvl == "topic"},
         "by_sub_topic": {k: stats(v) for (lvl, k), v in sorted(groups.items()) if lvl == "sub_topic"},
     }
-    if len(groups[("counting", "")]) < len(records):  # illusions present (VLMBias main)
+    if 0 < len(groups[("counting", "")]) < len(records):  # non-counting items present (VLMBias illusions etc.)
         out["counting"] = stats(groups[("counting", "")])
     return out
 
