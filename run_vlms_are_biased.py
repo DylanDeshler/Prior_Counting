@@ -340,6 +340,26 @@ class ChunkProgress:
         pass
 
 
+def has_mtp_weights(model):
+    """True if the checkpoint ships Qwen3.5's MTP head (hub checkpoints do; ms-swift/transformers merges don't)."""
+    p = Path(model)
+    if not p.is_dir():
+        return True
+    index = p / "model.safetensors.index.json"
+    if index.exists():
+        keys = json.loads(index.read_text())["weight_map"]
+    else:
+        from safetensors import safe_open
+        keys = set()
+        for f in p.glob("*.safetensors"):
+            with safe_open(f, "pt") as h:
+                keys |= set(h.keys())
+    found = any(k.startswith("mtp.") or ".mtp." in k for k in keys)
+    if not found:
+        print(f"{model}: no MTP head in the checkpoint, so speculative decoding is off (same answers, a bit slower)")
+    return found
+
+
 def build_messages(ex):
     return [{
         "role": "user",
@@ -377,9 +397,10 @@ class VLLMBackend:
             tensor_parallel_size=args.tensor_parallel_size,
             limit_mm_per_prompt={"image": 1},
             # Qwen3.5's built-in multi-token-prediction head as the draft model (exact under greedy
-            # decoding). Skipped when serving LoRAs: the MTP head isn't adapted, so drafts would mostly
-            # be rejected, and spec decode + LoRA isn't a well-trodden path in vLLM.
-            speculative_config=None if adapters else {"method": "mtp", "num_speculative_tokens": 2},
+            # decoding). Skipped when serving LoRAs (the MTP head isn't adapted) and for checkpoints without
+            # MTP weights: transformers doesn't load the head, so merged fine-tuned checkpoints lack it.
+            speculative_config=(None if adapters or not has_mtp_weights(args.model)
+                                else {"method": "mtp", "num_speculative_tokens": 2}),
             **lora_kwargs,
         )
         # Greedy decoding, matching the lmms-eval config for this benchmark.

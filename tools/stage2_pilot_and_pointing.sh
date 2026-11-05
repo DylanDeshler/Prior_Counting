@@ -11,7 +11,7 @@
 # Safe to rerun: training resumes from its latest checkpoint (every 50 steps) or is skipped once merged;
 # evaluations resume per question.
 # GPU steps wait for free memory (the GPU is shared). The pointing baseline runs even if Gate 2 fails.
-# Env: ARM / FORMAT / SEED (pilot arm, default conflict-count / number / 0), BATCH (per-device train batch, 4),
+# Env: ARM / FORMAT / SEED (pilot arm, default conflict-count / number / 0), BATCH (micro-batch, default auto),
 #      TRAIN_GPU_GIB (free memory to wait for before training, 24), GPU_WAIT_MAX_H (12).
 set -euo pipefail
 DATA=${1:-/data/vlm}

@@ -382,8 +382,10 @@ tools/train_arm.sh /data/vlm <arm> <format> <seed>  # e.g. conflict-count number
 - **Then it** merges the adapter (always; see §4.7) and runs the eval suite.
 - **Output:** `runs/<arm>-<format>-qwen3.5-s<seed>/`. Rerunning skips training if a merged checkpoint
   exists.
-- **Knobs:** `BATCH=2` if it runs out of memory (gradient accumulation adjusts to keep the effective
-  batch at 32); `SKIP_EVAL=1`.
+- **Micro-batch:** chosen automatically as the largest that fits the free GPU memory (count answers
+  up to 32 per pass, point answers about 8), with gradient accumulation keeping the effective batch at 32.
+  On out-of-memory it halves and resumes from the last checkpoint. `BATCH=N` fixes it; `SKIP_EVAL=1`
+  skips the eval.
 - **Untested:** this is the first run of this stack. If ms-swift rejects a flag, check
   `swift sft --help` for 4.6 and adjust in `tools/train_arm.sh`.
   - **Gate 2 pass:** synthetic val accuracy ≥ 95% on conflict pairs (the "Val conflict" column in
