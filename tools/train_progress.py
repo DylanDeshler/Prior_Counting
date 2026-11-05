@@ -14,6 +14,14 @@ import re
 import sys
 import time
 
+
+def num(x, default=float("nan")):
+    """ms-swift logs some values as strings ('0.1998', '31m 2s'): never let formatting fail."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
 TQDM = re.compile(r"(Train|Val)[^|]*?(\d+)%\|.*?\|\s*(\d+)/(\d+)\s*\[([\d:]+)<([\d:?]+),\s*([\d.?]+)\s*(s/it|it/s)")
 LOGDICT = re.compile(r"\{'(?:loss|eval_loss|train_runtime)'.*\}")
 HARMLESS = ("None of the inputs have requires_grad", "check_backward_validity", "TRITON_DEFAULT_FP_FUSION",
@@ -75,17 +83,18 @@ class View:
             return
         d = LOGDICT.search(seg)
         if d:
-            try:
-                logs = ast.literal_eval(d.group(0))
+            try:  # nan / inf are not Python literals: map them to None first
+                logs = ast.literal_eval(re.sub(r"(?<![\w'])-?(nan|inf)(?![\w'])", "None", d.group(0)))
             except (ValueError, SyntaxError):
                 logs = {}
+                self.say(f"(unparsed log line) {d.group(0)[:200]}")  # never show stale numbers silently
             if "eval_loss" in logs:
                 self.s["phase"] = "train"
                 acc = logs.get("eval_token_acc")
-                self.say(f"eval   step {self.s.get('step', '?')}: eval_loss {logs['eval_loss']:.4f}"
-                         + (f"  eval_acc {acc:.3f}" if acc is not None else ""))
+                self.say(f"eval   step {self.s.get('step', '?')}: eval_loss {num(logs['eval_loss']):.4f}"
+                         + (f"  eval_acc {num(acc):.3f}" if acc is not None else ""))
             elif "train_runtime" in logs:
-                self.say(f"done   train_runtime {logs['train_runtime']:.0f}s  final loss {logs.get('train_loss', float('nan')):.4f}")
+                self.say(f"done   train_runtime {num(logs['train_runtime']):.0f}s  final loss {num(logs.get('train_loss')):.4f}")
             else:
                 self.s.update(logs)
                 self.s["phase"] = "train"
@@ -97,6 +106,13 @@ class View:
             return
         self.say(raw)  # keep indentation (tracebacks)
 
+    def safe_feed(self, seg):
+        """The view must never stop reading: if it died, training would die with it (broken pipe)."""
+        try:
+            self.feed(seg)
+        except Exception as e:  # show the raw line instead
+            sys.stdout.write(CLEAR + seg.rstrip() + f"   [progress view: {type(e).__name__}: {e}]\n")
+
     def run(self, stream):
         buf = ""
         while True:
@@ -105,11 +121,11 @@ class View:
                 break
             self.raw.write(ch)
             if ch in "\r\n":
-                self.feed(buf)
+                self.safe_feed(buf)
                 buf = ""
             else:
                 buf += ch
-        self.feed(buf)
+        self.safe_feed(buf)
         sys.stdout.write(CLEAR + self.status() + "\n")
         sys.stdout.flush()
 
