@@ -12,23 +12,8 @@ DATA=${1:-/data/vlm}
 MODEL=${MODEL:-Qwen/Qwen3.5-4B}
 cd "$(dirname "$0")/.."
 
-mkdir -p "$DATA/reports/logs"
-LOG="$DATA/reports/logs/stage1_$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "$LOG") 2>&1
-step() { echo -e "\n==================== $(date '+%F %T')  $*"; }
-
-gpu_free_mib()  { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1; }
-gpu_total_mib() { nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1; }
-
-# Block until at least $1 GiB of GPU memory is free (other jobs share this GPU).
-wait_for_gpu() {
-  local need=$(( $1 * 1024 )) waited=0 max=$(( ${GPU_WAIT_MAX_H:-12} * 60 ))
-  while (( $(gpu_free_mib) < need )); do
-    (( waited >= max )) && { echo "GPU never had $1 GiB free within ${GPU_WAIT_MAX_H:-12} h; stopping."; exit 1; }
-    (( waited % 10 == 0 )) && echo "$(date +%T) waiting for GPU: $(gpu_free_mib) MiB free, need $1 GiB"
-    sleep 60; waited=$(( waited + 1 ))
-  done
-}
+source tools/common.sh
+start_log "$DATA" stage1
 
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found: run this on the GPU box"; exit 1; }
 echo "data dir: $DATA   model: $MODEL   log: $LOG"
@@ -52,10 +37,9 @@ done
 step "3/4  baseline: core eval suite for $MODEL"
 # vLLM takes a fixed share of GPU memory; use what is free now (at most 85%), and at least ~16 GiB.
 wait_for_gpu 16
-free=$(gpu_free_mib); total=$(gpu_total_mib)
-util=$(python3 -c "print(f'{min(0.85, $free / $total - 0.05):.2f}')")
-echo "GPU: $free / $total MiB free -> EVAL_GPU_UTIL=${EVAL_GPU_UTIL:-$util}"
-EVAL_GPU_UTIL=${EVAL_GPU_UTIL:-$util} tools/eval_suite.sh "$DATA" "$MODEL"
+util=$(eval_gpu_util)
+echo "GPU: $(gpu_free_mib) / $(gpu_total_mib) MiB free -> EVAL_GPU_UTIL=$util"
+EVAL_GPU_UTIL=$util tools/eval_suite.sh "$DATA" "$MODEL"
 
 step "4/4  done"
 echo "data report:   $DATA/reports.tar.gz   (CI: $DATA/reports/ci_report.json)"
