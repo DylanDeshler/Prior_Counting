@@ -34,7 +34,8 @@ if [[ ! -x "$SWIFT_ENV/bin/swift" || "$(cat "$SWIFT_ENV/.reqs" 2>/dev/null)" != 
   uv pip install --python "$SWIFT_ENV/bin/python" --torch-backend auto "${SWIFT_REQS[@]}"
   echo "${SWIFT_REQS[*]}" > "$SWIFT_ENV/.reqs"
 fi
-export PYTHONNOUSERSITE=1  # no ~/.local packages either
+export PYTHONNOUSERSITE=1          # no ~/.local packages either
+export TRITON_DEFAULT_FP_FUSION=1  # keep Triton's current default and its deprecation notice quiet
 SWIFT=("$SWIFT_ENV/bin/swift")
 
 # The most advanced complete checkpoint across run versions (a resumed run writes into a new v* dir):
@@ -74,7 +75,8 @@ if ! merged_done; then
       --gradient_checkpointing true --max_length 1536 --truncation_strategy delete \
       --seed "$SEED" --data_seed "$SEED" --output_dir "$RUN" \
       --save_strategy steps --save_steps 50 --save_total_limit 2 --logging_steps 10 \
-      --dataloader_num_workers 4 --dataset_num_proc 4 "${RESUME[@]}"
+      --dataloader_num_workers 4 --dataset_num_proc 4 "${RESUME[@]}" 2>&1 \
+      | "$SWIFT_ENV/bin/python" tools/train_progress.py "$RUN/train_raw.log"   # one live status line; full output in the raw log
     read -r CKPT STEP MAX <<< "$(ckpt_state)"
   fi
   (( MAX > 0 && STEP >= MAX )) || { echo "training did not finish: latest checkpoint at step $STEP of $MAX"; exit 1; }
