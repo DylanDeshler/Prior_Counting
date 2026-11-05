@@ -8,7 +8,8 @@
 #   3. evaluate the BASE model on the core suite with the pointing prompt (results as Qwen3.5-4B+point)
 #   4. summary table + results report (plots and samples)
 #
-# Safe to rerun: training is skipped once a merged checkpoint exists, evaluations resume per question.
+# Safe to rerun: training resumes from its latest checkpoint (every 50 steps) or is skipped once merged;
+# evaluations resume per question.
 # GPU steps wait for free memory (the GPU is shared). The pointing baseline runs even if Gate 2 fails.
 # Env: ARM / FORMAT / SEED (pilot arm, default conflict-count / number / 0), BATCH (per-device train batch, 4),
 #      TRAIN_GPU_GIB (free memory to wait for before training, 24), GPU_WAIT_MAX_H (12).
@@ -27,13 +28,13 @@ echo "data dir: $DATA   pilot: $RUN   log: $LOG"
 uv sync
 
 step "1/4  train pilot: $ARM ($FORMAT), seed $SEED"
-if ls -d "$RUN"/v*/checkpoint-*-merged >/dev/null 2>&1; then
+if ls "$RUN"/v*/checkpoint-*-merged/.complete >/dev/null 2>&1; then
   echo "merged checkpoint exists, skipping training"
 else
   wait_for_gpu "${TRAIN_GPU_GIB:-24}"
-  SKIP_EVAL=1 tools/train_arm.sh "$DATA" "$ARM" "$FORMAT" "$SEED"
+  SKIP_EVAL=1 tools/train_arm.sh "$DATA" "$ARM" "$FORMAT" "$SEED"   # resumes from its latest checkpoint
 fi
-MERGED=$(ls -d "$RUN"/v*/checkpoint-*-merged | sort -V | tail -1)
+MERGED=$(dirname "$(ls -d "$RUN"/v*/checkpoint-*-merged/.complete | sort -V | tail -1)")
 echo "merged model: $MERGED"
 
 step "2/4  evaluate pilot on the core suite"
