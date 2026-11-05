@@ -10,6 +10,8 @@
 #     "pillow",
 #     "safetensors",
 #     "tqdm",
+#     "pycocotools",
+#     "scipy",
 #     # GPU speedups (Linux/CUDA): vLLM engine, and prebuilt Hub kernels (FlashAttention 2/3,
 #     # flash-linear-attention, causal-conv1d) for the HF backend -- nothing to compile.
 #     "vllm>=0.30; sys_platform == 'linux'",
@@ -75,9 +77,11 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
@@ -85,6 +89,35 @@ from tqdm import tqdm
 from answer_parsing import extract_answer, matches
 
 DATASET_ID = "anvo25/vlms-are-biased"
+POINT_RE = re.compile(r'"?point_2d"?\s*:\s*\[\s*"?(-?\d+(?:\.\d+)?)"?\s*,\s*"?(-?\d+(?:\.\d+)?)"?\s*\]')
+POINT_SUFFIX = (' First locate every one of them: list them as JSON, [{"point_2d": [x, y], "label": "item"}, ...], '
+                'with x and y on a 0-1000 scale. Then give the total number in curly brackets, e.g., {9}.')
+
+
+def point_prompt(prompt):
+    """Counting questions only (yes/no illusions keep their prompt)."""
+    if "number in curly brackets" not in prompt:
+        return prompt
+    return prompt.split(" Answer with")[0] + POINT_SUFFIX
+
+
+def parse_points(text):
+    """point_2d coordinates in the reply (after any thinking block); tolerant of quoted numbers."""
+    return [(float(x), float(y)) for x, y in POINT_RE.findall(text.split("</think>")[-1])]
+
+
+def point_f1(points, masks_rle, size=448):
+    """F1 of predicted points (0-1000 grid) against ground-truth unit masks, Hungarian-matched: a point
+    matches a unit if it falls inside the unit's mask (§7.2)."""
+    from pycocotools import mask as mask_utils
+    from scipy.optimize import linear_sum_assignment
+    if not points or not masks_rle:
+        return 0.0
+    masks = [mask_utils.decode({"size": m["size"], "counts": m["counts"].encode()}) for m in masks_rle]
+    hit = np.array([[m[min(size - 1, max(0, int(y / 1000 * size))), min(size - 1, max(0, int(x / 1000 * size)))]
+                     for m in masks] for x, y in points], float)
+    r, c = linear_sum_assignment(-hit)
+    return float(2 * hit[r, c].sum() / (len(points) + len(masks)))
 SPLITS = ["main", "identification", "withtitle", "original", "remove_background_q1q2", "remove_background_q3"]
 VLLM_LORA_RANKS = [1, 8, 16, 32, 64, 128, 256, 320, 512]
 
@@ -96,6 +129,9 @@ def parse_args():
                    help="PEFT adapter dirs, or parent dirs searched recursively for adapter_config.json.")
     p.add_argument("--skip-base", action="store_true", help="Only evaluate the adapters.")
     p.add_argument("--split", default="main", choices=SPLITS)
+    p.add_argument("--prompt-style", choices=["default", "point"], default="default",
+                   help="point: ask the model to first point at every counted item (point_2d JSON, 0-1000 grid), "
+                        "then give the total (Gate 1 baseline). Results are saved as model '<name>+point'.")
     p.add_argument("--records", nargs="*", type=Path, default=None,
                    help="Evaluate generated data instead of VLMBias: data dir, pool dirs, or records.jsonl files.")
     p.add_argument("--limit", type=int, default=None, help="Evaluate only the first N items.")
@@ -143,6 +179,14 @@ def summarize(records):
             # Over items that have a prior answer (all of VLMBias; conflict pairs in generated data).
             "bias_ratio": sum(r["bias_aligned"] for r in with_bias) / len(with_bias) if with_bias else None,
             "unparsed": sum(r["pred"] == "" for r in rs) / n,
+            # Point readouts (§7.2): share of replies with a point list; accuracy of the list length as the
+            # answer; list length == stated total; point F1 on items with ground-truth masks.
+            "pointing_rate": sum(r.get("n_points", 0) > 0 for r in rs) / n,
+            "list_accuracy": sum(r.get("list_correct", False) for r in rs) / n,
+            "list_bias": (sum(r.get("list_familiar", False) for r in with_bias) / len(with_bias)) if with_bias else None,
+            "agreement": (sum(r.get("agree", False) for r in rs) / max(1, sum(r.get("n_points", 0) > 0 for r in rs))),
+            "point_f1": (float(np.mean([r["point_f1"] for r in rs if "point_f1" in r]))
+                         if any("point_f1" in r for r in rs) else None),
             "truncated": sum(r.get("truncated", False) for r in rs) / n,
         }
 
@@ -168,6 +212,12 @@ def print_summary(name, summary):
     row("OVERALL", summary["overall"])
     if "counting" in summary:
         row("COUNTING ONLY (no optical illusions)", summary["counting"])
+    o = summary.get("counting", summary["overall"])
+    if o.get("pointing_rate"):
+        f1 = f", point F1 {100 * o['point_f1']:.1f}" if o.get("point_f1") is not None else ""
+        lb = f", list bias {100 * o['list_bias']:.1f}%" if o.get("list_bias") is not None else ""
+        print(f"{'POINTING':<52} rate {100 * o['pointing_rate']:.1f}%, list-length acc {100 * o['list_accuracy']:.1f}%"
+              f"{lb}, list = stated total {100 * o['agreement']:.1f}%{f1}")
     if summary.get("by_role"):
         print("-- by role (pooled over pools)")
         for k, s in summary["by_role"].items():
@@ -486,6 +536,8 @@ def load_generated(paths, limit):
                     "topic": pool, "sub_topic": f"{pool} · {fam} · {r['role']}",
                     "type_of_question": r["question_template"], "pixel": 448, "prompt": r["question"],
                     "ground_truth": str(r["answer"]),
+                    "image_sha256": r.get("image_sha256"),  # lets reports verify they show the image that was evaluated
+                    "masks_rle": r.get("masks_rle") or [],  # for point F1 (not saved with predictions)
                     # Only where the prior answer is wrong (counterfactuals), as in VLMBias.
                     "expected_bias": None if r["familiar_answer"] in (None, r["answer"]) else str(r["familiar_answer"]),
                 })
@@ -530,11 +582,15 @@ def main():
         if args.limit:
             ds = ds.select(range(min(args.limit, len(ds))))
         data_tag = args.split
+    if args.prompt_style == "point":
+        ds = ds.map(lambda ex: {"prompt": point_prompt(ex["prompt"])})
     ids = ds["ID"]
     meta_cols = ["ID", "topic", "sub_topic", "type_of_question", "pixel", "prompt", "ground_truth", "expected_bias"]
+    if "image_sha256" in ds.column_names:
+        meta_cols.append("image_sha256")
 
     mode = "think" if args.thinking else "nothink"
-    base_name = model_name(args.model)
+    base_name = model_name(args.model) + ("+point" if args.prompt_style == "point" else "")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # Build names by string concat: Path.with_suffix would treat ".5-4B..." in "Qwen3.5-4B" as a suffix.
     stems = {v: f"{base_name if v is None else base_name + '+' + v}_{data_tag}_{mode}" for v in variants}
@@ -569,6 +625,9 @@ def main():
                         correct=matches(pred, ex["ground_truth"]),
                         bias_aligned=ex["expected_bias"] not in (None, "") and matches(pred, ex["expected_bias"]),
                     )
+                    pts = parse_points(response)
+                    if pts and ex.get("masks_rle"):
+                        record["point_f1"] = point_f1(pts, ex["masks_rle"])
                     files[v].write(json.dumps(record) + "\n")
                     done[v][ex["ID"]] = record
                 for f in files.values():
@@ -584,6 +643,11 @@ def main():
             r["pred"] = extract_answer(r["response"])
             r["correct"] = matches(r["pred"], r["ground_truth"])
             r["bias_aligned"] = r["expected_bias"] not in (None, "") and matches(r["pred"], r["expected_bias"])
+            pts = parse_points(r["response"])
+            r["n_points"] = len(pts)
+            r["list_correct"] = bool(pts) and matches(str(len(pts)), r["ground_truth"])
+            r["list_familiar"] = bool(pts) and r["expected_bias"] not in (None, "") and matches(str(len(pts)), r["expected_bias"])
+            r["agree"] = bool(pts) and r["pred"].isdigit() and int(r["pred"]) == len(pts)
         summary = summarize([done[v][id_] for id_ in ids])
         summary["config"] = {"model": args.model, "adapter": None if v is None else str(adapters[v]),
                              "data": data_tag, "thinking": args.thinking,

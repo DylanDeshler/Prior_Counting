@@ -243,6 +243,7 @@ Ordered so that every day ends with something showable, and later days build on 
 |---|---|---|---|---|
 | 1 | **E0a. Finish data QA**: point-format probe, blind check | `datagen all` (resumes; only GPU tools run) | 0.5 h | `reports/blind_check.json`, `point_format_probe.json`, data report tarball |
 | 1 | ~~E0b. Base-model baseline / Gate 0~~ **done 11-04** (§3.1) | `tools/eval_suite.sh /data/vlm` | 0.6 h | Baseline row of `results/RESULTS.md`; Gate 0 pass; conflict dose T0 42%, T2 color 1% |
+| 2 (before the pilot) | **E0d. Pointing-prompt baseline / Gate 1**: same suite, prompt asks the model to point at every item, then give the total | `PROMPT_STYLE=point tools/eval_suite.sh /data/vlm` | 0.7 h | Row `Qwen3.5-4B+point`; does prompting alone fix it? Stated total vs point-list length, point F1 |
 | 1 (overnight) | E0c. *Optional:* thinking-mode baseline on VLMBias main | `run_vlms_are_biased.py --thinking --max-new-tokens 16384` | 2–3 h | Does reasoning fix prior override for free? |
 | 2 | **E1-pilot / Gate 2**: train C-count seed 0, check in-distribution val ≥ 95% | `tools/train_arm.sh /data/vlm conflict-count number 0` | 1.5 h | Training works (or not); first trained row |
 | 3 | **E1 core 2×2, seed 0**: N-count, N-point, C-point (C-count done on day 2) | `train_arm.sh … neutral-count number 0`, `… neutral-point points 0`, `… conflict-point points 0` | 5 h | Contrasts 1–3 of the design doc |
@@ -254,6 +255,33 @@ Ordered so that every day ends with something showable, and later days build on 
 
 **If time runs short:** cut, in order, E0c → day 6 → the seed 2 runs. The minimum showable set is E0b,
 the four core arms at seed 0, and C-blind.
+
+### 5.0 Gate 1 and the pointing angle
+
+Qwen3.5 should inherit Qwen3-VL's pointing (`point_2d` on a 0–1000 grid). `tools/point_format_probe.py`
+measures it (`/data/vlm/reports/point_format_probe.json`). E0d runs the full suite with a pointing prompt
+and reads two answers per item:
+- the **stated total** (the final `{N}`);
+- the **point-list length**.
+
+It also reports pointing rate, how often the two agree, and point F1 against ground-truth masks on
+generated data.
+
+| E0d outcome | What it means / next step |
+|---|---|
+| Pointing ≥ +20 pts over the plain baseline (design doc Gate 1) | The skill exists but isn't the default. Study 1's N-point comparison is then against the prompted-pointing base, and the question becomes "does training make pointing the default and robust to phrasing?" |
+| List length beats the stated total, especially on counterfactuals | The prior re-enters at the final readout, after the evidence is written out (§8.3 of the design doc). The list length is a free, deterministic fix. |
+| No gain | Pointing alone doesn't beat the prior; that motivates the trained point arms. |
+
+**Research angle if pointing helps: distill the grounded answer into the plain answer.** Can a model that
+answers "how many?" directly match what it achieves when it points first? Options, cheapest first:
+1. **Self-distillation:** run the base model with the pointing prompt, keep replies whose point list is
+   correct (or use the list length as the label), and train count-only targets on those images.
+   Grounded reasoning becomes a direct answer with no extra tokens at inference.
+2. **Format-transfer arms:** train on point-then-count targets, then evaluate with the plain count prompt
+   (does it still point?), and the reverse.
+3. **Mechanism:** compare against the N-enum arm (enumeration without coordinates) to separate
+   "coordinates" from "listing items one by one".
 
 ### 5.1 How to read the results (pre-registered in the design doc)
 
@@ -335,7 +363,8 @@ It warns if a results file is older than the data it's matched to, since the sam
 differ from what the model saw. Copy it with `scp <host>:<repo>/results/report.tar.gz .`.
 - **The suite:** VLMBias main, VLMBias `original` (guardrail), T0 count, T2 color, and synthetic
   validation. All runs use greedy decoding, thinking off, and the same 4,096-token cap.
-- **Knobs:** `EVAL_GPU_UTIL=0.5` when the GPU is shared; `EVAL_MAX_TOKENS` changes the cap.
+- **Knobs:** `EVAL_GPU_UTIL=0.5` when the GPU is shared; `EVAL_MAX_TOKENS` changes the cap;
+  `PROMPT_STYLE=point` uses the pointing prompt and saves results as `<model>+point`.
 - **Single runs:** `uv run run_vlms_are_biased.py --model <m> --split original` or `--records <pool>`.
   `--thinking` turns thinking on.
 

@@ -1,9 +1,12 @@
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # answer_parsing.py lives at the repo root
 
 # Point the package at a throwaway data dir with a few fake background photos, before import.
 _tmp = Path(tempfile.mkdtemp(prefix="counterpoint-test-"))

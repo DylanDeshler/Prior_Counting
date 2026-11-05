@@ -73,7 +73,7 @@ def load_records(data, ids):
             if rid in want:
                 r = json.loads(line)
                 recs[rid] = {k: r.get(k) for k in ("id", "pair_id", "image", "points", "object_bbox", "answer",
-                                                   "familiar_answer", "role", "family", "edit", "label")}
+                                                   "familiar_answer", "role", "family", "edit", "label", "image_sha256")}
                 recs[rid]["_built"] = f.stat().st_mtime
     return recs
 
@@ -88,6 +88,21 @@ def vlmbias_images(ids, split):
     want = set(ids)
     idx = [i for i, x in enumerate(ds["ID"]) if x in want]
     return {ds[i]["ID"]: ds[i]["image"] for i in idx}
+
+
+def drop_mismatched(rows, recs):
+    """Unlink predictions whose item no longer matches the data (rebuilt after the eval): the image hash
+    differs (when the prediction recorded it) or the truth differs. Returns the number unlinked."""
+    bad = 0
+    for p in rows:
+        r = recs.get(p["ID"])
+        if r is None:
+            continue
+        sha = p.get("image_sha256")
+        if (sha and sha != r.get("image_sha256")) or str(r["answer"]) != str(p["ground_truth"]):
+            recs.pop(p["ID"])  # treated as "image not found": shown as text only, never with a wrong image
+            bad += 1
+    return bad
 
 
 def family_role(p):
@@ -470,12 +485,12 @@ def main():
             if not tag.startswith("gen-"):
                 continue
             short = tag.replace("gen-", "").replace("+", "_")
-            built = [recs[p["ID"]]["_built"] for p in rows if p["ID"] in recs]
-            if built and max(built) > PRED_MTIME.get((m, tag), 0):
-                body.append(f"<p style='color:#b42318'><b>Warning:</b> {html.escape(short)} predictions are older than "
-                            f"the data they are matched to (data rebuilt after this eval). Sample images may differ "
-                            f"from what the model saw; rerun the eval to refresh.</p>")
-                print(f"WARNING: {m} {short}: predictions predate the data build; samples may show other images")
+            bad = drop_mismatched(rows, recs)
+            if bad:
+                body.append(f"<p style='color:#b42318'><b>Warning:</b> {bad} of {len(rows)} {html.escape(short)} "
+                            f"predictions don't match the current data (it was rebuilt after this eval): different "
+                            f"truth or image. Those items are shown without images. Rerun the eval to refresh.</p>")
+                print(f"WARNING: {m} {short}: {bad}/{len(rows)} predictions don't match the current data; shown without images")
             plots += [plot_families(rows, img, m, short), plot_where_answers_land(rows, img, m, short),
                       plot_offsets(rows, img, m, short), plot_shared(rows, img, m, short),
                       plot_color_confusion(rows, img, m, short)]

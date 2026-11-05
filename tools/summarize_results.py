@@ -39,6 +39,8 @@ def main(results="results"):
         if tag == "main":
             c = s.get("counting", s["overall"])
             r["vlm_acc"], r["vlm_bias"] = c["accuracy"], c["bias_ratio"]
+            if c.get("pointing_rate"):
+                r["pt_rate"], r["vlm_list"], r["vlm_list_bias"] = c["pointing_rate"], c["list_accuracy"], c.get("list_bias")
         elif tag == "original":
             r["orig"] = s.get("counting", s["overall"])["accuracy"]  # 326 counting items, illusions excluded
         elif "T0-count" in tag or "T2-color" in tag:
@@ -47,6 +49,8 @@ def main(results="results"):
             r[k + "_can"] = roles.get("canonical", {}).get("accuracy")
             r[k + "_cf"] = roles.get("counterfactual", {}).get("accuracy")
             r[k + "_bias"] = roles.get("counterfactual", {}).get("bias_ratio")
+            if s["overall"].get("point_f1") is not None:
+                r[k + "_f1"] = s["overall"]["point_f1"]
         elif "val_conflict" in tag:
             topics = s.get("by_topic", {})
             r["val_c"] = topics.get("e1_val_conflict", s["overall"])["accuracy"]
@@ -62,6 +66,13 @@ def main(results="results"):
         cells = [r.get("vlm_acc"), r.get("vlm_bias"), r.get("orig"), bal, r.get("t0_can"), r.get("t0_cf"),
                  r.get("t0_bias"), r.get("t2_can"), r.get("t2_cf"), r.get("t2_bias"), r.get("val_c"), r.get("val_s")]
         lines.append("| " + " | ".join([model] + [pct(c) for c in cells]) + " |")
+    if any("pt_rate" in r for r in rows.values()):  # pointing readouts (pointing prompt or point-trained arms)
+        ph = ["model", "pointing rate", "VLMBias list-length acc", "list bias", "stated-total acc", "T0 point F1"]
+        lines += ["", "Pointing readouts (counting items):", "", "| " + " | ".join(ph) + " |", "|" + "---|" * len(ph)]
+        for model, r in sorted(rows.items()):
+            if "pt_rate" in r:
+                lines.append("| " + " | ".join([model] + [pct(r.get(k)) for k in
+                                                           ("pt_rate", "vlm_list", "vlm_list_bias", "vlm_acc", "t0_f1")]) + " |")
     table = "\n".join(lines)
     print(table)
     (Path(results) / "RESULTS.md").write_text("# Results (thinking off, greedy)\n\n" + table + "\n\n" + __doc__.split("Columns")[1])
