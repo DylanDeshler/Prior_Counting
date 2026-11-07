@@ -1,6 +1,6 @@
 # counterpoint-vlm: progress report and one-week experiment plan
 
-*Status as of 2026-11-05 (baseline, pointing baseline and first trained arm done). Companion to `data_generation_spec.md`, `vlm_prior_counting_design.md` and the proposal.*
+*Status as of 2026-11-05 (baseline, pointing baseline, C-count pilot and C-blind done). Companion to `data_generation_spec.md`, `vlm_prior_counting_design.md` and the proposal.*
 
 ## 1. Summary
 
@@ -231,6 +231,32 @@ The October numbers (1,024-token cap, before the parser fix) were 10.8% / 72.7% 
   epoch would probably pass, but then the protocol differs between arms. Recommendation: keep 2 epochs
   and report clock as the outlier.
 
+**C-blind (Gate 3): is the pilot's gain a text shortcut?** C-blind trains on the same conflict
+questions and answers as C-count, but every conflict image is replaced by a gray frame (the shared block
+keeps its real images). Same 512 steps.
+
+| Model | VLMBias acc | bias | Canonical | Balanced | T0 cf acc (bias) | Val conflict | Val shared |
+|---|---|---|---|---|---|---|---|
+| Base | 12.7 | 73.4 | 96.9 | 54.8 | 47.3 (42.4) | 61.4 | 8.9 |
+| C-count | **20.6** | 56.6 | 92.0 | **56.3** | **75.7 (12.6)** | 93.1 | 31.2 |
+| C-blind | 9.8 | 62.2 | 86.5 | 48.1 | 45.6 (45.4) | 56.5 | 30.4 |
+
+- **Accuracy gains are not a shortcut.** C-blind recovers none of C-count's accuracy gain (−2.9 vs +7.9).
+  Item by item, C-blind fixed 129 and broke 186 (net −57), against C-count's net +158. On held-out T0,
+  C-blind is unchanged (45.6), while C-count goes from 47.3 to 75.7. The pilot's gains come from the
+  images.
+- **The bias-rate drop *is* partly a shortcut.** C-blind cuts bias by 11.2 points, two thirds of
+  C-count's 16.8, which is past Gate 3's "half or more" bar for that metric. It does this by answering
+  the familiar count **+2** (294 items) or +1 (125). That's a learned "edited images want a slightly
+  different answer" rule, and it costs canonical accuracy (−10.4 points: unedited 4-legged animals get "5",
+  two-star flags get "4"). C-count shows a weaker version of the same drift: 135 of its wrong answers are
+  familiar +2, against 42 for the base.
+- **Consequence:** report conflict arms on **accuracy and balanced accuracy**, not bias rate, as the
+  design doc's Gate 3 rule says. On balanced accuracy, C-count beats C-blind by 8.2 points (56.3 vs 48.1).
+- **By topic:** C-blind gains only on logos (2.4 → 11.8; C-count gets 23.4) and loses on chess
+  (20.8 → 0.0) and flags. Its shared-block gain (30.4) matches C-count's (31.2), as expected, since both
+  saw the same real shared-block images.
+
 **Measurement fixes made while reading these results** (applied to all models by `tools/rescore_results.py`):
 - JSON point objects are no longer taken as answers.
 - "Counting" means numeric-answer questions only.
@@ -278,6 +304,14 @@ The October numbers (1,024-token cap, before the parser fix) were 10.8% / 72.7% 
 5. **The shared block** (12–51 shapes) is hard for the base model (3–14%). It's in every arm, so it can't
    explain differences between arms, but it dominates target length in the point arms.
 6. **Exp 2 L0 neutral arms are empty**, pending real-photo crowds.
+8. **Real-photo counting pool (`real/count`, test `tests/R/count`)** comes from LVIS instance
+   annotations: 3–15 instances of one category per square crop, with per-instance points and masks, so it
+   supports point targets and point F1. Filters (2026-11-07, after two visual checks): manufactured objects
+   and whole fruit only (no dishes, vegetables or slices), no instance touching the photo border, no
+   fragmented, tiny, thin or heavily overlapping instances, a small deny list, at most 120 train / 25 test
+   crops per category. LVIS val alone gives ~1,560 crops over 274 categories; train adds about 5x. In the
+   last check about 1 in 6 items was still debatable (stacked buckets/plates, teddy-bear "casts"). Labels
+   are LVIS counts, not SAM 3 recounts: run the Gate 4 audit on `tests/R/count` before reporting it.
 7. **Dynamic LoRA in vLLM** gives NaNs past about 400 tokens on Qwen3.5, so always evaluate merged
    checkpoints. `train_arm.sh` does this.
 
@@ -306,32 +340,40 @@ Ordered so that every day ends with something showable, and later days build on 
 **If time runs short:** cut, in order, E0c → day 6 → the seed 2 runs. The minimum showable set is E0b,
 the four core arms at seed 0, and C-blind.
 
-### 5.0 Gate 1 and the pointing angle
+### 5.0 Pointing is central (revised 2026-11-07 after the Gate 1 result)
 
-Qwen3.5 should inherit Qwen3-VL's pointing (`point_2d` on a 0–1000 grid). `tools/point_format_probe.py`
-measures it (`/data/vlm/reports/point_format_probe.json`). E0d runs the full suite with a pointing prompt
-and reads two answers per item:
-- the **stated total** (the final `{N}`);
-- the **point-list length**.
+The pointing-prompt baseline (§3.2) shows the base model can count *against* the prior when it lists
+the items: 37.2% list-length accuracy vs 12.7% direct, bias 27% vs 73%, and animals 0% → 73%. That
+ability just isn't the default, and it costs accuracy on unedited images (97% → 81%) and on dense layouts
+(chess, boards, grids). The design doc's H3 ("point-then-count training transfers more") becomes:
 
-It also reports pointing rate, how often the two agree, and point F1 against ground-truth masks on
-generated data.
+| Hypothesis | Claim | Test | Status |
+|---|---|---|---|
+| **H3a: grounding is latent** | The model can count against the prior when it enumerates; the failure is the direct readout | base direct vs base + pointing prompt | **supported** (§3.2) |
+| **Mechanism: where the prior re-enters** | Either the list is right and the final number reverts to the prior (late readout), or the list itself collapses to the familiar length | base `+pointT` (pointing prompt that must end with `Total: {N}`): list length vs stated total, and their agreement split by canonical vs counterfactual | queued |
+| **H3b: training makes grounding default and accurate** | Point-then-count training beats prompted pointing on counterfactuals *and* recovers canonical accuracy and dense layouts | C-point / N-point vs base `+point`, on accuracy, canonical and balanced accuracy | queued |
+| **H3c: grounding distills into the direct answer** | Training on the same images with both targets (point list + total, and direct `{N}`) improves the *direct* answer beyond C-count's, with no pointing at inference | `conflict-mixed` / `neutral-mixed` arms evaluated with the `direct` prompt, vs C-count `+direct` and base `+direct`; also C-point / N-point `+direct` (does pointing training alone carry over?) | queued |
+| H1/H2 (unchanged) | Conflict vs neutral data | C-* vs N-* within each format | partly (C-count, C-blind done) |
 
-| E0d outcome | What it means / next step |
-|---|---|
-| Pointing ≥ +20 pts over the plain baseline (design doc Gate 1) | The skill exists but isn't the default. Study 1's N-point comparison is then against the prompted-pointing base, and the question becomes "does training make pointing the default and robust to phrasing?" |
-| List length beats the stated total, especially on counterfactuals | The prior re-enters at the final readout, after the evidence is written out (§8.3 of the design doc). The list length is a free, deterministic fix. |
-| No gain | Pointing alone doesn't beat the prior; that motivates the trained point arms. |
+**New pieces for these tests:**
+- **Prompt variants** (shared by eval and training exports, in `answer_parsing.py`): `point` (the Gate 1
+  wording), `point-total` (must end with `Total: {N}`) and `direct` (number only, no listing). Results are
+  saved as `<model>+point`, `+pointT` and `+direct`.
+- **Mixed-format arms:** `conflict-mixed` and `neutral-mixed`. Same images as C-point / N-point; half the
+  examples use the `point-total` prompt with a point-list + total target, half the plain question with
+  `{N}`.
 
-**Research angle if pointing helps: distill the grounded answer into the plain answer.** Can a model that
-answers "how many?" directly match what it achieves when it points first? Options, cheapest first:
-1. **Self-distillation:** run the base model with the pointing prompt, keep replies whose point list is
-   correct (or use the list length as the label), and train count-only targets on those images.
-   Grounded reasoning becomes a direct answer with no extra tokens at inference.
-2. **Format-transfer arms:** train on point-then-count targets, then evaluate with the plain count prompt
-   (does it still point?), and the reverse.
-3. **Mechanism:** compare against the N-enum arm (enumeration without coordinates) to separate
-   "coordinates" from "listing items one by one".
+**Why mixed rather than self-distillation from the model's own points:** on synthetic data the ground
+truth is known, so distilling the model's own correct point counts into `{N}` would reproduce C-count's
+targets. What the mixed arms test is whether supervising the grounded format on the same images transfers
+to the direct answer. Self-distillation becomes the interesting version for unlabeled real photos (L2/L3).
+
+**Queue** (`tools/queue_experiments.sh`), in this order:
+1. Base `+pointT`, base `+direct`.
+2. C-point (+ `direct`), N-point (+ `direct`).
+3. C-mixed (+ `direct`, `point-total`), N-mixed (+ `direct`), C-count `+direct`.
+4. N-count, N-enum, B-count, C-L0.
+5. Seeds 1 and 2 for C-point, C-mixed, C-count, N-point, N-mixed, N-count.
 
 ### 5.1 How to read the results (pre-registered in the design doc)
 

@@ -28,7 +28,7 @@ T0_COUNT_PAIRS = {"traffic_light": 500, "snowflake": 500}
 E2_VOLUME = 4  # C-L0x4 / C-L2x4 volume arms (§5.8)
 E2_COUNT_FAMILIES = {"stop_sign": (-2, -1, 1, 2), "clock_numerals": (-1, -2, -3)}  # §5.2 Δ per family
 T2_COLOR_PAIRS = 500
-STEPS = ["shared", "e1", "t0", "e2", "l2"]
+STEPS = ["shared", "e1", "t0", "e2", "l2", "real"]
 
 
 def workers():
@@ -218,7 +218,7 @@ def preflight(steps):
 
 STEP_POOLS = {"shared": ["shared_range"], "e1": ["e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict",
                "e1/val_neutral", "e1/val_shared"], "t0": ["tests/T0/count"], "e2": ["e2/L0/count"],
-               "l2": ["e2/L2/color", "tests/T2/color"]}
+               "l2": ["e2/L2/color", "tests/T2/color"], "real": ["real/count", "tests/R/count"]}
 
 
 def fingerprint(step):
@@ -241,12 +241,28 @@ def up_to_date(step):
             and all((DATA / pool / "records.jsonl").exists() for pool in STEP_POOLS[step]))
 
 
+def build_real():
+    """Real-photo counting with points (unedited LVIS crowds): real/count for training, tests/R/count held out."""
+    from . import coco, photo_count as pc
+    if not (coco.DIR / "lvis_val.pkl").exists():
+        print("real: skipped (photo sources missing: run `python -m datagen sources`)")
+        return
+    cands = pc.candidates()
+    for split, out, step in (("train", "real/count", "real_count"), ("test", "tests/R/count", "real_count_test")):
+        jobs = pc.count_jobs(cands, split)
+        coco.download_images([(j["sample_kw"]["cand"]["image_id"], j["sample_kw"]["cand"]["url"]) for j in jobs])
+        recs, s = run_jobs(jobs, out, step)
+        write_pool(out, renumber(recs), step, {**s, "candidates": sum(c["split"] == split for c in cands),
+                                               "categories": len({r["family"] for r in recs})})
+
+
 def build(steps=None, skip_up_to_date=False):
     preflight(steps or STEPS)
     for step in steps or STEPS:
         if skip_up_to_date and up_to_date(step):
             print(f"{step}: up to date, skipped")
             continue
-        {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2}[step]()
+        {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2,
+         "real": build_real}[step]()
         REPORTS.mkdir(parents=True, exist_ok=True)
         (REPORTS / f"step_{step}.json").write_text(json.dumps({"fingerprint": fingerprint(step)}))

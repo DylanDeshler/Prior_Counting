@@ -14,6 +14,7 @@ Columns (thinking off):
   T2 can / cf / bias       held-out color objects on real photos (same three numbers)
   Val conflict / shared    in-distribution synthetic validation: conflict pairs (Gate 2: >= 95%) and the shared
                            large-count block (12-51 shapes; hard, reported separately)
+  Real count               held-out real-photo counting (unedited LVIS crowds, 3-30 instances): accuracy
 """
 
 import json
@@ -51,6 +52,10 @@ def main(results="results"):
             r[k + "_bias"] = roles.get("counterfactual", {}).get("bias_ratio")
             if s["overall"].get("point_f1") is not None:
                 r[k + "_f1"] = s["overall"]["point_f1"]
+        elif "R-count" in tag:
+            o = s["overall"]
+            r["real_acc"], r["real_f1"] = o["accuracy"], o.get("point_f1")
+            r["real_list"] = o.get("list_accuracy") if o.get("pointing_rate") else None
         elif "val_conflict" in tag:
             topics = s.get("by_topic", {})
             r["val_c"] = topics.get("e1_val_conflict", s["overall"])["accuracy"]
@@ -59,20 +64,22 @@ def main(results="results"):
         print("no results yet")
         return
     head = ["model", "VLMBias cnt acc", "bias", "Orig acc", "Balanced", "T0 can", "T0 cf", "T0 bias",
-            "T2 can", "T2 cf", "T2 bias", "Val conflict", "Val shared"]
+            "T2 can", "T2 cf", "T2 bias", "Val conflict", "Val shared", "Real count"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for model, r in sorted(rows.items(), key=lambda kv: (kv[0] != "Qwen3.5-4B", kv[0])):
         bal = (r["vlm_acc"] + r["orig"]) / 2 if "vlm_acc" in r and "orig" in r else None
         cells = [r.get("vlm_acc"), r.get("vlm_bias"), r.get("orig"), bal, r.get("t0_can"), r.get("t0_cf"),
-                 r.get("t0_bias"), r.get("t2_can"), r.get("t2_cf"), r.get("t2_bias"), r.get("val_c"), r.get("val_s")]
+                 r.get("t0_bias"), r.get("t2_can"), r.get("t2_cf"), r.get("t2_bias"), r.get("val_c"), r.get("val_s"), r.get("real_acc")]
         lines.append("| " + " | ".join([model] + [pct(c) for c in cells]) + " |")
     if any("pt_rate" in r for r in rows.values()):  # pointing readouts (pointing prompt or point-trained arms)
-        ph = ["model", "pointing rate", "VLMBias list-length acc", "list bias", "stated-total acc", "T0 point F1"]
+        ph = ["model", "pointing rate", "VLMBias list-length acc", "list bias", "stated-total acc", "T0 point F1",
+              "Real list acc", "Real point F1"]
         lines += ["", "Pointing readouts (counting items):", "", "| " + " | ".join(ph) + " |", "|" + "---|" * len(ph)]
         for model, r in sorted(rows.items()):
             if "pt_rate" in r:
                 lines.append("| " + " | ".join([model] + [pct(r.get(k)) for k in
-                                                           ("pt_rate", "vlm_list", "vlm_list_bias", "vlm_acc", "t0_f1")]) + " |")
+                                                           ("pt_rate", "vlm_list", "vlm_list_bias", "vlm_acc", "t0_f1",
+                                                            "real_list", "real_f1")]) + " |")
     table = "\n".join(lines)
     print(table)
     (Path(results) / "RESULTS.md").write_text("# Results (thinking off, greedy)\n\n" + table + "\n\n" + __doc__.split("Columns")[1])

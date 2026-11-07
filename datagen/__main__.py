@@ -4,8 +4,8 @@
 
     preview              small version of every pool + report in data/preview/ (look at examples)
     sources [refresh]    download inputs, build exclusion lists, set U (§12); skips what exists unless `refresh`
-    build [steps...]     render datasets; steps: shared e1 t0 e2 l2 (default: all)
-    export [e1|e2]       write training files (default: both)
+    build [steps...]     render datasets; steps: shared e1 t0 e2 l2 real (default: all)
+    export [e1|e2|real]  write training files (default: e1 + e2; real = only the real-photo arms)
     check                CI checks (§10.1) -> data/reports/ci_report.json
     audit                render-audit contact sheets (§10.2) -> data/reports/audit/
     stats                statistics + plots -> data/reports/stats/index.html

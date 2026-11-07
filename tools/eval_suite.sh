@@ -16,5 +16,6 @@ EVAL=(uv run run_vlms_are_biased.py --model "$MODEL" --max-new-tokens "$CAP" --o
 "${EVAL[@]}" --split original                    # guardrail: unedited originals (canonical accuracy)
 "${EVAL[@]}" --records "$DATA/tests/T0/count"    # held-out families (traffic lights, snowflakes), rendered
 [[ -d "$DATA/tests/T2/color" ]] && "${EVAL[@]}" --records "$DATA/tests/T2/color"   # held-out color objects, real photos
+[[ -d "$DATA/tests/R/count" ]] && "${EVAL[@]}" --records "$DATA/tests/R/count"     # real-photo counting with points (held out)
 "${EVAL[@]}" --records "$DATA/e1/val_conflict" "$DATA/e1/val_shared"              # in-distribution (Gate 2)
 uv run tools/summarize_results.py results

@@ -280,6 +280,8 @@ def _key(p, mask_only=False):
 @lru_cache(maxsize=256)
 def _load(key):
     d = json.loads(key.split(":", 1)[1])
+    if d.get("plain"):  # unedited crop (real-photo counting)
+        return crop_image(d["i"], d["c"]).convert("RGBA")
     mask = crop_mask(d["s"], d["c"])
     if "ab" not in d:  # unit mask: alpha = object mask
         return Image.fromarray(np.dstack([np.full(mask.shape + (3,), 255, np.uint8), (mask * 255).astype(np.uint8)]), "RGBA")

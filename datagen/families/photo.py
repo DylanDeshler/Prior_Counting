@@ -1,6 +1,7 @@
 """L2 color generator (see photo_color.py for the pipeline)."""
 
 import hashlib
+import json
 
 import cv2
 import numpy as np
@@ -68,13 +69,67 @@ class PhotoColor(Family):
         return name if share >= VERIFY_MIN else f"mixed ({name} covers {share:.0%})"
 
     def post_check(self, img, rec):
-        import os
-        from ..exclusions import EXCLUSIONS, PHASH_MAX_DIST, nearest_eval_distance
-        if os.environ.get("COUNTERPOINT_PREVIEW") == "1" and not (EXCLUSIONS / "eval_phash.npz").exists():
-            rec["checks"]["phash_min_dist"] = None  # previews may run before the eval-image hashes exist
-            return
-        d = nearest_eval_distance(img)
-        rec["checks"]["phash_min_dist"] = d
-        if d <= PHASH_MAX_DIST:
-            from ..items import Unusable
-            raise Unusable(f"near-duplicate of an eval image (pHash distance {d})")
+        phash_check(img, rec)
+
+
+def phash_check(img, rec):
+    """Drop photo-derived images within pHash distance 6 of an eval image (§9.4)."""
+    import os
+    from ..exclusions import EXCLUSIONS, PHASH_MAX_DIST, nearest_eval_distance
+    if os.environ.get("COUNTERPOINT_PREVIEW") == "1" and not (EXCLUSIONS / "eval_phash.npz").exists():
+        rec["checks"]["phash_min_dist"] = None  # previews may run before the eval-image hashes exist
+        return
+    d = nearest_eval_distance(img)
+    rec["checks"]["phash_min_dist"] = d
+    if d <= PHASH_MAX_DIST:
+        from ..items import Unusable
+        raise Unusable(f"near-duplicate of an eval image (pHash distance {d})")
+
+
+class PhotoCount(Family):
+    """Unedited real photo: count all instances of one LVIS category (neutral, with ground-truth points)."""
+    name, unit = "photo_count", "instance"
+    fixed_frame = True
+    count_range = (1, 99)
+    templates = {"how_many": "How many {plural} are in the image?", "count_the": "Count the {plural} in the image."}
+
+    def label_for(self, p):
+        return p["label"]
+
+    def question_fields(self, p):
+        return {"plural": p["plural"]}
+
+    def sample(self, rng, count=None, cand=None):
+        from ..photo_count import plural
+        return {"count": cand["count"], "image_id": cand["image_id"], "crop": cand["crop"], "segs": cand["segs"],
+                "label": cand["category"], "plural": plural(cand["category"]), "colors": {"main": [128, 128, 128]}}
+
+    def _masks(self, p):
+        return [crop_mask(seg, p["crop"]) for seg in p["segs"]]
+
+    def scene(self, p):
+        image_key = "photo:" + json.dumps({"i": p["image_id"], "c": p["crop"], "plain": 1}, separators=(",", ":"))
+        units = []
+        for seg, m in zip(p["segs"], self._masks(p)):
+            ys, xs = np.nonzero(m)
+            depth = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 5)
+            yi, xi = np.unravel_index(int(np.argmax(depth)), depth.shape)  # deepest point: inside the instance
+            key = "photo:" + json.dumps({"i": p["image_id"], "c": p["crop"], "s": seg}, separators=(",", ":"))
+            units.append({"point": (float(xi), float(yi)), "mask": [("image", key, (IMG / 2, IMG / 2), IMG)],
+                          "size": float(min(np.ptp(xs) + 1, np.ptp(ys) + 1)) if len(xs) else 0.0})
+        return [("image", image_key, (IMG / 2, IMG / 2), IMG)], units
+
+    def object_bbox(self, p):
+        m = np.any(self._masks(p), axis=0)
+        ys, xs = np.nonzero(m)
+        return [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+
+    def colors(self, p):
+        return [(128, 128, 128)]
+
+    def recount(self, img, p, aff):
+        """Annotation-based (LVIS is exhaustive for this category here): instances with a visible mask."""
+        return sum(int(m.sum() >= 50) for m in self._masks(p))
+
+    def post_check(self, img, rec):
+        phash_check(img, rec)

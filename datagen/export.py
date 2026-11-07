@@ -27,6 +27,14 @@ E1_ARMS = {
     "conflict-blind": (["e1/conflict"], ["e1/val_conflict"], "number", True, None),
     "dice-only": (["e1/dice"], ["e1/val_conflict"], "number", False, "die"),
     "neutral-randpoint": (["e1/neutral"], ["e1/val_neutral"], "randpoints", False, None),
+    # Distillation arms (H3c): the same images with both targets, half each, chosen per item:
+    # pointing prompt -> point list + "Total: {N}", or the plain question -> "{N}".
+    "conflict-mixed": (["e1/conflict"], ["e1/val_conflict"], "mixed", False, None),
+    "neutral-mixed": (["e1/neutral"], ["e1/val_neutral"], "mixed", False, None),
+    # Real-photo counting (unedited LVIS crowds) with ground-truth points: grounding on photos.
+    "real-count": (["real/count"], [], "number", False, None),
+    "real-point": (["real/count"], [], "points", False, None),
+    "real-mixed": (["real/count"], [], "mixed", False, None),
 }
 SHARED, VAL_SHARED = "shared_range", "e1/val_shared"
 
@@ -61,8 +69,15 @@ def rows_for(records, fmt, model, point_fmt, blind=False):
     sft, rl = [], []
     for r in records:
         image = str(GRAY if (blind and r["data_type"] != "shared_range") else (DATA / r["image"]).resolve())
-        user = {"role": "user", "content": "<image>" + r["question"]}
-        sft.append({"id": r["id"], "messages": [user, {"role": "assistant", "content": target_text(r, fmt, model, point_fmt)}],
+        question, item_fmt = r["question"], fmt
+        if fmt == "mixed":
+            from answer_parsing import rewrite_prompt  # repo root: same wording as the eval's point-total prompt
+            if r["prior"] == "count" and item_seed("mixed", r["id"]) % 2:
+                question, item_fmt = rewrite_prompt(r["question"], "point-total"), "points"
+            else:
+                item_fmt = "number"
+        user = {"role": "user", "content": "<image>" + question}
+        sft.append({"id": r["id"], "messages": [user, {"role": "assistant", "content": target_text(r, item_fmt, model, point_fmt)}],
                     "images": [image]})
         rl_row = {"id": r["id"], "messages": [user], "images": [image], "answer": r["answer"],
                   "familiar_answer": r["familiar_answer"], "prior": r["prior"], "label": r.get("label")}
@@ -102,9 +117,13 @@ def export_arm(arm, train, val, fmt, blind, point_fmt):
     return len(train)
 
 
-def export_e1(point_fmt):
+def export_e1(point_fmt, only=None):
     shared, val_shared = load(SHARED), load(VAL_SHARED)
-    for arm, (pools, val_pools, fmt, blind, fam) in tqdm(E1_ARMS.items(), desc="Exp 1 arms", unit="arm"):
+    arms = {a: v for a, v in E1_ARMS.items() if only is None or a.startswith(only)}
+    for arm, (pools, val_pools, fmt, blind, fam) in tqdm(arms.items(), desc="Exp 1 arms", unit="arm"):
+        if not all((DATA / p / "records.jsonl").exists() for p in pools):
+            print(f"{arm:<20} skipped: pool not built ({', '.join(pools)})")
+            continue
         train = [r for p in pools for r in load(p, fam)] + shared
         val = [r for p in val_pools for r in load(p, fam)] + val_shared
         n = export_arm(arm, train, val, fmt, blind, point_fmt)
@@ -140,5 +159,7 @@ def export(which=("e1", "e2")):
     point_fmt = load_params()["qwen35_point_format"]
     if "e1" in which:
         export_e1(point_fmt)
+    elif "real" in which:  # only the real-photo arms (safe while other arms' files are being trained on)
+        export_e1(point_fmt, only="real-")
     if "e2" in which:
         export_e2(point_fmt)

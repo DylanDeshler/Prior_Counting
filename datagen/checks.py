@@ -20,8 +20,8 @@ from .families import E1_FAMILIES, HELD_OUT
 from .items import render_clean, render_record
 
 POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict", "e1/val_neutral", "e1/val_shared",
-         "tests/T0/count", "e2/L0/count", "e2/L2/color", "tests/T2/color"]
-TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L2/color"]
+         "tests/T0/count", "e2/L0/count", "e2/L2/color", "tests/T2/color", "real/count", "tests/R/count"]
+TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L2/color", "real/count"]
 
 # Allowed Δ per family (§4.2, §5.2). Fixed-canonical families use exactly these values, uniformly.
 FIXED_DELTAS = {"clock": {-3, -2, -1, 1, 2, 3}, "stop_sign": {-3, -2, -1, 1, 2, 3}, "calendar": {-3, -2, -1, 1, 2, 3},
@@ -223,10 +223,10 @@ def check_leakage(rep, pools):
                     problems.append(f"{r['id']}: COCO image {r['source']['image_id']} is used by an eval set")
                 if r["checks"].get("phash_min_dist", 99) <= 6:
                     problems.append(f"{r['id']}: near-duplicate of an eval image")
-    test_ids = {r["source"]["image_id"] for p in ("tests/T2/color",) for r in pools.get(p, [])}
+    test_ids = {r["source"]["image_id"] for p in ("tests/T2/color", "tests/R/count") for r in pools.get(p, [])}
     train_ids = {r["source"]["image_id"] for p in TRAIN_POOLS for r in pools.get(p, []) if r["level"] != "L0"}
     if test_ids & train_ids:
-        problems.append(f"{len(test_ids & train_ids)} source photos appear in both training and T2 (§9.6)")
+        problems.append(f"{len(test_ids & train_ids)} source photos appear in both training and a photo test set (§9.6)")
     if not excl_file.exists():
         problems.append("exclusions/vlmbias_categories.json missing (run `python -m datagen sources`)")
     rep.add("leakage: no held-out families/objects or excluded categories in training", not problems,

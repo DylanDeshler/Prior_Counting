@@ -86,21 +86,10 @@ import torch
 from datasets import load_dataset
 from tqdm import tqdm
 
-from answer_parsing import extract_answer, matches
+from answer_parsing import STYLE_TAG, extract_answer, matches, rewrite_prompt
 
 DATASET_ID = "anvo25/vlms-are-biased"
 POINT_RE = re.compile(r'"?point_2d"?\s*:\s*\[\s*"?(-?\d+(?:\.\d+)?)"?\s*,\s*"?(-?\d+(?:\.\d+)?)"?\s*\]')
-POINT_SUFFIX = (' First locate every one of them: list them as JSON, [{"point_2d": [x, y], "label": "item"}, ...], '
-                'with x and y on a 0-1000 scale. Then give the total number in curly brackets, e.g., {9}.')
-
-
-def point_prompt(prompt):
-    """Counting questions only (yes/no illusions keep their prompt)."""
-    if "number in curly brackets" not in prompt:
-        return prompt
-    return prompt.split(" Answer with")[0] + POINT_SUFFIX
-
-
 def parse_points(text):
     """point_2d coordinates in the reply (after any thinking block); tolerant of quoted numbers."""
     return [(float(x), float(y)) for x, y in POINT_RE.findall(text.split("</think>")[-1])]
@@ -129,9 +118,10 @@ def parse_args():
                    help="PEFT adapter dirs, or parent dirs searched recursively for adapter_config.json.")
     p.add_argument("--skip-base", action="store_true", help="Only evaluate the adapters.")
     p.add_argument("--split", default="main", choices=SPLITS)
-    p.add_argument("--prompt-style", choices=["default", "point"], default="default",
-                   help="point: ask the model to first point at every counted item (point_2d JSON, 0-1000 grid), "
-                        "then give the total (Gate 1 baseline). Results are saved as model '<name>+point'.")
+    p.add_argument("--prompt-style", choices=list(STYLE_TAG), default="default",
+                   help="point: point at every counted item, then the total (Gate 1 baseline, saved as '<name>+point'); "
+                        "point-total: same but must end with 'Total: {N}' ('+pointT'); direct: number only, no "
+                        "listing ('+direct'). Counting questions only; others keep their prompt.")
     p.add_argument("--records", nargs="*", type=Path, default=None,
                    help="Evaluate generated data instead of VLMBias: data dir, pool dirs, or records.jsonl files.")
     p.add_argument("--limit", type=int, default=None, help="Evaluate only the first N items.")
@@ -605,15 +595,15 @@ def main():
         if args.limit:
             ds = ds.select(range(min(args.limit, len(ds))))
         data_tag = args.split
-    if args.prompt_style == "point":
-        ds = ds.map(lambda ex: {"prompt": point_prompt(ex["prompt"])})
+    if args.prompt_style != "default":
+        ds = ds.map(lambda ex: {"prompt": rewrite_prompt(ex["prompt"], args.prompt_style)})
     ids = ds["ID"]
     meta_cols = ["ID", "topic", "sub_topic", "type_of_question", "pixel", "prompt", "ground_truth", "expected_bias"]
     if "image_sha256" in ds.column_names:
         meta_cols.append("image_sha256")
 
     mode = "think" if args.thinking else "nothink"
-    base_name = model_name(args.model) + ("+point" if args.prompt_style == "point" else "")
+    base_name = model_name(args.model) + STYLE_TAG[args.prompt_style]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # Build names by string concat: Path.with_suffix would treat ".5-4B..." in "Qwen3.5-4B" as a suffix.
     stems = {v: f"{base_name if v is None else base_name + '+' + v}_{data_tag}_{mode}" for v in variants}

@@ -194,7 +194,9 @@ def attempt_job(job, attempt):
     rng = rng_for(seed)
     if job["kind"] == "single":
         params = fam.sample(rng, count=job["count"], **job.get("sample_kw", {}))
-        render = {"generator": job["generator"], "params": params, **common_render(fam, rng, [params], job.get("distractors", True))}
+        photo = job.get("photo", False)
+        render = {"generator": job["generator"], "params": params,
+                  **common_render(fam, rng, [params], job.get("distractors", True) and not photo, not photo)}
         compression = sample_compression(rng)
         return [base_record(job, "neutral", params, {}, render, compression, seed, attempt, None, None)]
 

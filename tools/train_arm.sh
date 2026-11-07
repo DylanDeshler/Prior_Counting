@@ -119,4 +119,6 @@ MERGED=$(dirname "$(ls -d "$RUN"/v*/checkpoint-*-merged/.complete | sort -V | ta
 echo "merged model: $MERGED"
 [[ "${SKIP_EVAL:-0}" == 1 ]] && exit 0
 
-tools/eval_suite.sh "$DATA" "$MERGED"
+# The GPU is shared: wait for room, and give vLLM what is free now (unless EVAL_GPU_UTIL is set).
+command -v nvidia-smi >/dev/null && wait_for_gpu 16
+EVAL_GPU_UTIL=$(eval_gpu_util) tools/eval_suite.sh "$DATA" "$MERGED"
