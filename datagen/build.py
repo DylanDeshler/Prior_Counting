@@ -31,9 +31,20 @@ T2_COLOR_PAIRS = 500
 STEPS = ["shared", "e1", "t0", "e2", "l2", "real"]
 
 
+def available_ram_gb():
+    try:
+        with open("/proc/meminfo") as f:
+            return next(int(l.split()[1]) for l in f if l.startswith("MemAvailable")) / 2**20
+    except (OSError, StopIteration):
+        return None
+
+
 def workers():
-    # Leave headroom for eval/training jobs sharing the machine.
-    return max(1, (os.cpu_count() or 2) - 2)
+    # Leave headroom for eval/training jobs sharing the machine, and cap by free RAM (about 1 GB per worker
+    # process): too many workers on a box with little free memory can swap the machine to a standstill.
+    n = max(1, (os.cpu_count() or 2) - 2)
+    ram = available_ram_gb()
+    return n if ram is None else max(1, min(n, int(ram / 1.0) - 4))
 
 
 def split_evenly(total, k):

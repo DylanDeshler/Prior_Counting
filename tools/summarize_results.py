@@ -14,7 +14,7 @@ Columns (thinking off):
   T2 can / cf / bias       held-out color objects on real photos (same three numbers)
   Val conflict / shared    in-distribution synthetic validation: conflict pairs (Gate 2: >= 95%) and the shared
                            large-count block (12-51 shapes; hard, reported separately)
-  Real count               held-out real-photo counting (unedited LVIS crowds, 3-30 instances): accuracy
+  Real count               held-out real-photo counting (unedited LVIS crowds, 3-15 instances): accuracy
 """
 
 import json

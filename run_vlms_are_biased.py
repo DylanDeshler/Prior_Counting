@@ -14,7 +14,7 @@
 #     "scipy",
 #     # GPU speedups (Linux/CUDA): vLLM engine, and prebuilt Hub kernels (FlashAttention 2/3,
 #     # flash-linear-attention, causal-conv1d) for the HF backend -- nothing to compile.
-#     "vllm>=0.30; sys_platform == 'linux'",
+#     "vllm>=0.30,<0.31; sys_platform == 'linux'",  # pinned: all arms must use the same engine
 #     "kernels>=0.17,<0.18; sys_platform == 'linux'",
 # ]
 # ///
