@@ -13,12 +13,17 @@ BARE = re.compile(r"^\s*([A-Za-z]+|\d+)\s*\.?\s*$")
 
 def extract_answer(text):
     """Content of the last {...} answer in the response (after any thinking block). If there are none,
-    accept a reply that is nothing but the answer ("6", "red"); never pick numbers out of prose."""
+    accept a final 'Total: N' line (point-total prompt), or a reply that is nothing but the answer ("6",
+    "red"); never pick numbers out of prose."""
     text = text.split("</think>")[-1]
     # Ignore JSON objects (e.g. {"point_2d": [x, y], "label": "pip"} in point lists): they are not answers.
     matches = [m for m in re.findall(r"\{([^{}]*)\}", text) if '"' not in m and ":" not in m]
     if matches:
         return matches[-1].strip()
+    # The point-total prompt asks for a last line 'Total: {N}'; the model often drops the braces.
+    total = re.findall(r"(?im)^\W*total\W*:\s*\**\s*(\d+)\b", text)
+    if total:
+        return total[-1]
     bare = BARE.match(text)
     return bare.group(1) if bare else ""
 

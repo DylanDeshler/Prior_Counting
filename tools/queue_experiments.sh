@@ -133,13 +133,16 @@ for job in "${JOBS[@]}"; do
   mins=$(( ($(date +%s) - t0) / 60 ))
   if (( rc == 0 )); then STATUS+=("$tag: done in $mins min")
   else STATUS+=("$tag: FAILED after $mins min (see log; rerun the queue to retry)"); fi
-  uv run tools/summarize_results.py results >/dev/null 2>&1 || true   # keep RESULTS.md current
+  # Re-score every saved answer with the current parser (picks up parser fixes after a git pull), then
+  # rebuild RESULTS.md. No GPU, ~1 min.
+  uv run tools/rescore_results.py results >/dev/null 2>&1 || true
   status
 done
 
 step "queue finished"
 printf '  %s\n' "${STATUS[@]}"
-uv run tools/summarize_results.py results || true
+uv run tools/rescore_results.py results >/dev/null 2>&1 || true
+cat results/RESULTS.md
 uv run python tools/results_report.py --data "$DATA" || echo "WARNING: results report failed (results are still in results/)"
 echo
 echo "summary: results/RESULTS.md   report: results/report.tar.gz   log: $LOG"

@@ -261,6 +261,29 @@ keeps its real images). Same 512 steps.
 - JSON point objects are no longer taken as answers.
 - "Counting" means numeric-answer questions only.
 
+### 3.2c Queue run 1 (2026-11-09): point-then-total prompt, forced direct answers, real-photo counting
+
+Base model, counting items, rescored with the parser fix for bare `Total: N` lines:
+
+| prompt | VLMBias acc / bias | Orig (canonical) | Balanced | T0 can / cf / bias | Val conflict / shared | Real count (list acc, point F1) |
+|---|---|---|---|---|---|---|
+| default | 12.7 / 73.4 | 96.9 | 54.8 | 99.8 / 47.3 / 42.4 | 61.4 / 8.9 | (real-sweep pending) |
+| direct (number only) | 9.0 / 73.1 | (running) | | | | |
+| point-then-total | **39.0 / 26.1** | 79.1 | 59.1 | 71.5 / 61.1 / 5.3 | 46.1 / 19.6 | 47.1 (47.1, F1 77.1) |
+
+- **Pointing with a stated total roughly triples VLMBias accuracy** (660 items gained, 150 lost vs default)
+  and cuts bias 73 to 26, at a canonical cost (96.9 to 79.1, mostly logos/flags, typically off by 1–2).
+- **Mechanism: the list and the total mostly agree (85%).** When they disagree (12% of VLMBias counting
+  items), the stated total is closer to the familiar answer than the list is in 177 cases vs 58 the other
+  way: a late pull toward the prior. It nets out in accuracy (18 list-right/total-wrong vs 18 the reverse)
+  and is concentrated in dense layouts (chess/xiangqi pieces, tallies, dice, board grids). On T0 and
+  real photos the two almost never disagree (<1%). So most of the remaining bias is already in the list
+  (list bias 23%): the prior acts mainly while enumerating, not as an override of a correct list.
+- **Forced direct answers are slightly worse than the default prompt** (9.0 vs 12.7, same bias): the
+  short reasoning the model writes by default helps a little; prior override is not about verbosity.
+- **Real-photo counting (1,754 held-out crops, 3–15 instances):** 47% exact with pointing, point F1 0.77,
+  so the model finds most instances but miscounts often. Plain-prompt number pending (real-sweep).
+
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
 - **Fixed-prior families reproduce the VLMBias pattern.**
