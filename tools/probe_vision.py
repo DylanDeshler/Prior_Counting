@@ -193,7 +193,7 @@ class AttnPoolProbe(torch.nn.Module):
         return self.out(torch.einsum("bth,bthd->bhd", att, v).reshape(b, -1))
 
 
-def image_count_probe(Itr, ytr, Ite, yte, vimg, vstates, layers, dev, epochs=40, seed=0, heads=12):
+def image_count_probe(Itr, ytr, Ite, yte, vimg, vstates, layers, dev, epochs=40, seed=0, heads=12, five_leg=()):
     """Per layer: train AttnPoolProbe on non-VLMBias items (labels = true count), early-stop on held-out items,
     then read VLMBias: does it decode the true count or the familiar one from the image tokens alone?"""
     out = {}
@@ -222,6 +222,9 @@ def image_count_probe(Itr, ytr, Ite, yte, vimg, vstates, layers, dev, epochs=40,
             m.load_state_dict(best_state)
         m.eval()
         row = {"heldout_acc": best}
+        if Xte is not None and five_leg:
+            with torch.no_grad():
+                row["heldout_five_leg_reads_5"] = float((m(Xte[list(five_leg)]).argmax(1).cpu() == 5).float().mean())
         for grp, items in vimg.items():
             with torch.no_grad():
                 pred = m(torch.stack([d[l] for d in items]).to(dev).float()).argmax(1).cpu().numpy()
@@ -229,7 +232,7 @@ def image_count_probe(Itr, ytr, Ite, yte, vimg, vstates, layers, dev, epochs=40,
             row[grp] = {"reads_true": float(np.mean([p == t for p, (t, _) in zip(pred, truth)])),
                         "reads_familiar": float(np.mean([p == f for p, (_, f) in zip(pred, truth)]))}
         out[l] = row
-        print(f"image-token count probe layer {l:2d}: held-out {best:.2f} | " + " | ".join(
+        print(f"image-token count probe layer {l:2d}: held-out {best:.2f} (5-leg edits read 5: {row.get('heldout_five_leg_reads_5', float('nan')):.2f}) | " + " | ".join(
             f"{g} reads true {row[g]['reads_true']:.2f} / familiar {row[g]['reads_familiar']:.2f}" for g in vimg))
         del Xtr, Xte
     return out
@@ -364,8 +367,16 @@ def main():
         recs = [r for r in read_jsonl(data / pool / "records.jsonl") if r.get("prior") == "count" and r["answer"] < 10]
         rng.shuffle(recs)
         return recs[:n]
-    ctrain = count_items("parts/count", args.count_train // 2) + count_items("e1/val_conflict", args.count_train // 2)
-    ctest = count_items("tests/P/count", args.count_test // 2) + count_items("tests/T0/count", args.count_test // 2)
+    # v2 (2026-11-10): train on the leg EDIT pairs (parts/conflict_v2: many 3- and 5-legged animals) + synthetic
+    # pairs. v1 trained on natural Pascal-Part crops, where no animal shows more than 4 legs, so the probe could
+    # never output 5 for an animal and its VLMBias reading ("familiar" 95%) was uninformative. Held-out: the held-out
+    # leg edits (the base answers 0% of the five-leg ones correctly) + held-out synthetic families.
+    leg_pool = "parts/conflict_v2" if (data / "parts/conflict_v2/records.jsonl").exists() else "parts/count"
+    ctrain = count_items(leg_pool, args.count_train // 2) + count_items("e1/val_conflict", args.count_train // 2)
+    ctest = count_items("tests/P/conflict", args.count_test // 2) + count_items("tests/T0/count", args.count_test // 2)
+    res["count_probe_data"] = {"train": [leg_pool, "e1/val_conflict"], "heldout": ["tests/P/conflict", "tests/T0/count"]}
+    five_leg = [i for i, r in enumerate(ctest) if r.get("dataset", "").startswith("parts_conflict") and r["answer"] == 5]
+    res["heldout_five_leg_n"] = len(five_leg)
     def states_of(recs, desc):
         H, y, I = [], [], []
         for r in tqdm(recs, desc=desc, unit="item"):
@@ -383,6 +394,8 @@ def main():
             clf = LogisticRegression(max_iter=3000, C=0.05).fit((Htr[:, l] - mu) / sd, ytr_c)
             cls = list(clf.classes_)
             row = {"heldout_acc": float((clf.predict((Hte[:, l] - mu) / sd) == yte_c).mean()) if Hte is not None else None}
+            if Hte is not None and five_leg:  # held-out five-leg edits: does the probe read 5 where the model says 4?
+                row["heldout_five_leg_reads_5"] = float((clf.predict((Hte[five_leg, l] - mu) / sd) == 5).mean())
             for grp, st in vstates.items():
                 X = (np.stack([h[l] for h, _, _ in st]) - mu) / sd
                 P = clf.predict_proba(X)
@@ -396,7 +409,9 @@ def main():
         best = max(layers_all, key=lambda l: count_probe[l].get("animals", {}).get("reads_true", 0) - count_probe[l].get("animals", {}).get("reads_familiar", 0))
         res["count_probe"] = count_probe
         res["count_probe_best_layer_animals"] = best
-        res["image_count_probe"] = image_count_probe(Itr, ytr_c, Ite, yte_c, vimg, vstates, img_layers, R.dev, heads=args.pool_heads)
+        res["image_count_probe"] = image_count_probe(Itr, ytr_c, Ite, yte_c, vimg, vstates, img_layers, R.dev, heads=args.pool_heads,
+                                                     five_leg=five_leg)
+        res["probe_version"] = 2
         print("count probe (layer: held-out acc | animals reads true / familiar | other reads true / familiar):")
         for l in layers_all[::4] + [layers_all[-1]]:
             r_ = count_probe[l]

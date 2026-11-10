@@ -64,6 +64,7 @@ JOBS=(
   "prompt base                                  think"
   "prompt part-conflict-point-points-qwen3.5-s0 debias"
   "probe base"
+  "probe part2-conflict-point-points-qwen3.5-s0"
   "steer base"
   "train part2-conflict-point points 0 late"
   "probe part2-conflict-point-points-qwen3.5-s0-L16-31"
@@ -215,7 +216,7 @@ for job in "${JOBS[@]}"; do
       [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
       NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
     fi
-    grep -q image_count_probe "$DATA/reports/probe/$NAME/probe.json" 2>/dev/null && { STATUS+=("$tag: already done"); continue; }
+    grep -q '"probe_version": 2' "$DATA/reports/probe/$NAME/probe.json" 2>/dev/null && { STATUS+=("$tag: already done"); continue; }
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
     uv run tools/probe_vision.py --data "$DATA" --model "$MODEL"; rc=$?

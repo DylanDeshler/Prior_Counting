@@ -543,6 +543,41 @@ base undercounts by 9 to 1).
   (animals vs excl. animals) and the originals; (c) LoRA restricted to layers 16-31 (`LORA_LAYERS=16-31`),
   `part2-conflict-point ... late`.
 
+### 3.2l Prompt study, part2-conflict-count, and the first count probes (2026-11-10)
+
+**Prompt study** (base model; VLMBias counting + originals):
+
+| prompt | VLMBias | animals | excl. animals | canonical | balanced |
+|---|---|---|---|---|---|
+| default | 12.7 | 0.0 | 17.4 | **96.9** | 54.8 |
+| direct answer | 9.0 | 0.0 | 12.4 | 95.1 | 52.1 |
+| step by step (`cot`) | 14.3 | 0.0 | 19.7 | 94.5 | 54.4 |
+| de-bias ("count each and every {part}… may have been edited… ignore what you expect") | 19.5 | 1.3 | 26.3 | 87.1 | 53.3 |
+| step by step + de-bias ("…intentionally ignore my bias…") | 15.9 | 0.7 | 21.6 | 90.2 | 53.0 |
+| thinking mode (8,192 tokens; 25% truncated, 17.5% unparsed) | 12.8 | 0.0 | 17.6 | 85.3 | 49.0 |
+| point-then-total | 39.0 | **78.8** | 24.0 | 79.1 | 59.1 |
+| point-then-total + de-bias | **40.2** | 74.5 | **27.2** | 81.6 | **60.9** |
+| part-conflict-point + de-bias | 40.5 | 71.2 | 28.8 | – | – |
+
+- Text instructions never unlock animals (0-1%); only pointing does. Thinking mode adds nothing and a
+  quarter of its answers hit the cap (mostly illusions, chess, grids).
+- The de-bias text alone lifts the other topics to 26.3, the same as the trained arms' "transfer" (26-29),
+  at -10 canonical. So the non-animal gains of training are no larger than telling the model the image
+  may be edited.
+
+**part2-conflict-count** (v2 data, number targets): VLMBias 38.4, animals **96.5**, excl. animals 16.4 (no
+transfer), canonical 86.5, balanced **62.4** (best of any model); own held-out edits ~81-83% in every cell
+(five-leg 81%), the best in-domain learner. Number targets learn the edits; point targets add some
+non-animal transfer; neither generalizes beyond what a prompt gives.
+
+**Count probes, first run: inconclusive.** Both (answer-position linear, 12-head attention pool over image
+tokens) read "familiar" on ~95% of VLMBias animals at every layer for all three models. But their training
+data (natural Pascal-Part crops + synthetic pairs) contained no animal with more than 4 legs, so they could
+not output 5 for an animal; held-out accuracy was also low (0.43-0.53 image tokens; up to 0.71 at the answer
+position, rising with depth). Fixed (`probe_version` 2): trained on the v2 leg edits (many 3- and 5-legged
+animals) + synthetic pairs, held-out on tests/P/conflict + T0, with a direct readout of whether the probe
+reads 5 on held-out five-leg edits (where the base never answers 5). Re-probes of base and part2 queued.
+
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
 - **Fixed-prior families reproduce the VLMBias pattern.**
