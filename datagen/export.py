@@ -42,9 +42,16 @@ E1_ARMS = {
     "part-neutral-point": (["parts/count"], [], "points", False, None),
     "part-conflict-point": (["parts/conflict"], [], "points", False, None),
     "part-conflict-count": (["parts/conflict"], [], "number", False, None),
+    # Format-collapse fix: point-trained part arms answered color questions with point lists (T2 color 95 -> 38%).
+    # Same leg pairs + real-photo color questions (L2 color pool, "{color}" targets), half as many as leg images.
+    "part-conflict-point-mixq": (["parts/conflict", "e2/L2/color@0.5"], [], "points", False, None),
+    # v2 leg pairs (parts.build_v2): add-heavy, foot-anchored points; mixed with color questions so the point
+    # arm keeps answering non-counting questions normally.
+    "part2-conflict-point": (["parts/conflict_v2", "e2/L2/color@0.5"], [], "points", False, None),
+    "part2-conflict-count": (["parts/conflict_v2", "e2/L2/color@0.5"], [], "number", False, None),
 }
 SHARED, VAL_SHARED = "shared_range", "e1/val_shared"
-REAL_ONLY = ("real-", "part-")
+REAL_ONLY = ("real-", "part-", "part2-")
 # Out-of-distribution validation for every arm: real-photo crops held out of real/count (never trained on,
 # disjoint from tests/R/count). Its loss is logged every 50 steps during training, so overfitting to the
 # synthetic layouts shows up as a rising real-photo loss; the checkpoint sweep scores its accuracy.
@@ -153,10 +160,16 @@ def export_e1(point_fmt, only=None):
     real_val = load(REAL_VAL) if held else None
     arms = {a: v for a, v in E1_ARMS.items() if only is None or a.startswith(only)}
     for arm, (pools, val_pools, fmt, blind, fam) in tqdm(arms.items(), desc="Exp 1 arms", unit="arm"):
-        if not all((DATA / p / "records.jsonl").exists() for p in pools):
+        if not all((DATA / p.partition("@")[0] / "records.jsonl").exists() for p in pools):
             print(f"{arm:<20} skipped: pool not built ({', '.join(pools)})")
             continue
-        train = [r for p in pools for r in load(p, fam) if not (held and r["id"] in held)]
+        train = []
+        for p in pools:
+            p, _, ratio = p.partition("@")  # "pool@0.5": a stable-hash sample, 0.5 x the size of the first pool
+            recs = [r for r in load(p, fam) if not (held and r["id"] in held)]
+            if ratio:
+                recs = sorted(recs, key=lambda r: (item_seed(arm, r["id"]), r["id"]))[:int(float(ratio) * len(train))]
+            train += recs
         if not arm.startswith(REAL_ONLY):
             train += shared
         # Validation loss on held-out real photos when available (out of distribution for the synthetic

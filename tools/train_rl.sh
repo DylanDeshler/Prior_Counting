@@ -2,37 +2,60 @@
 # GRPO (RL) on top of a trained SFT arm, with verifiable rewards: correct total, points on the real units,
 # list length = stated total (tools/rl_rewards.py). Then merge and run the core eval suite.
 #
-#   tools/train_rl.sh <data_dir> <start_run> [rl_arm ...]
-#   tools/train_rl.sh /data/vlm part-conflict-point-points-qwen3.5-s0                      # RL on the part pools
-#   tools/train_rl.sh /data/vlm part-conflict-point-points-qwen3.5-s0 part-conflict-point real-point
+#   tools/train_rl.sh <data_dir> <start> [rl_arm ...]
+#   tools/train_rl.sh /data/vlm base                                   # base model + point-then-total prompt (default plan)
+#   tools/train_rl.sh /data/vlm part-conflict-point-points-qwen3.5-s0  # on top of a trained arm (plain prompts)
 #
-# start_run: a run under runs/ with a merged checkpoint (the policy starts from it; a new LoRA is trained on
-# top). rl_arm: export arms whose points/train_rl.jsonl rows are the RL prompts (default: the two part arms).
-# Output: runs/<start_run>-grpo, results named <start_run>-grpo-ckpt<N>-merged.
+# start: "base" = Qwen3.5-4B with the point-then-total prompt on every RL question and in the eval (the
+# strongest untrained condition, so a gain is measured against the bar that matters); or a run under runs/
+# with a merged checkpoint. A new LoRA is trained on top. rl_arm: export arms whose points/train_rl.jsonl rows
+# are the RL prompts (counting rows only; default part2-conflict-point). Output: runs/<start>-grpo (base:
+# runs/base-pointT-grpo); results <run>-ckpt<N>-merged (+pointT for base).
 # Env: RL_STEPS (200), RL_GENERATIONS (8 completions per prompt), RL_PROMPTS (8 prompts per step),
 #      RL_LR (1e-5), RL_BETA (0.04, KL to the start policy), RL_MAX_TOKENS (768), RL_VLLM (0: HF generate;
 #      1: colocated vLLM rollouts, faster but needs vllm in the ms-swift env), SKIP_EVAL=1.
 # Resumable like train_arm.sh: checkpoints every 25 steps; rerun to continue.
 set -euo pipefail
 DATA=${1:?data dir}; START=${2:?start run, e.g. part-conflict-point-points-qwen3.5-s0}; shift 2
-ARMS=("$@"); (( ${#ARMS[@]} )) || ARMS=(part-conflict-point part-neutral-point)
+ARMS=("$@"); (( ${#ARMS[@]} )) || ARMS=(part2-conflict-point)
 cd "$(dirname "$0")/.."
 source tools/common.sh
-RUN="runs/${START}-grpo"
+if [[ "$START" == base ]]; then RUN="runs/base-pointT-grpo"; STYLE=point-total; else RUN="runs/${START}-grpo"; STYLE=default; fi
 SWIFT_ENV=${SWIFT_ENV:-.venv-swift}
 [[ -x "$SWIFT_ENV/bin/swift" ]] || { echo "missing $SWIFT_ENV (run tools/train_arm.sh once to create it)"; exit 1; }
 export PYTHONNOUSERSITE=1 TRITON_DEFAULT_FP_FUSION=1
 SWIFT=("$SWIFT_ENV/bin/swift")
 
-MODEL=$(ls -d runs/"$START"/v*/checkpoint-*-merged/.complete 2>/dev/null | sort -V | tail -1)
-[[ -n "$MODEL" ]] || { echo "no merged checkpoint for $START (train it first)"; exit 1; }
-MODEL=$(dirname "$MODEL")
+if [[ "$START" == base ]]; then MODEL=Qwen/Qwen3.5-4B
+else
+  MODEL=$(ls -d runs/"$START"/v*/checkpoint-*-merged/.complete 2>/dev/null | sort -V | tail -1)
+  [[ -n "$MODEL" ]] || { echo "no merged checkpoint for $START (train it first)"; exit 1; }
+  MODEL=$(dirname "$MODEL")
+fi
+mkdir -p "$RUN/rl_data"
 DATASETS=()
 for a in "${ARMS[@]}"; do
   f="$DATA/exports/$a/qwen3.5/points/train_rl.jsonl"
   [[ -f "$f" ]] || { echo "missing $f (run: python -m datagen --data $DATA export)"; exit 1; }
   grep -q '"unit_size"' "$f" || { echo "$f predates the RL point reward (re-export)"; exit 1; }
-  DATASETS+=("$f")
+  # counting rows only (color rows have no verifiable count/points); questions rewritten to the eval prompt style
+  python3 - "$f" "$RUN/rl_data/$a.jsonl" "$STYLE" <<'PY'
+import json, sys
+sys.path.insert(0, ".")
+from answer_parsing import rewrite_prompt
+src, dst, style = sys.argv[1:]
+n = 0
+with open(src) as fi, open(dst, "w") as fo:
+    for line in fi:
+        r = json.loads(line)
+        if r.get("prior") != "count":
+            continue
+        u = r["messages"][0]
+        u["content"] = "<image>" + rewrite_prompt(u["content"].replace("<image>", "", 1), style)
+        fo.write(json.dumps(r, ensure_ascii=False) + "\n"); n += 1
+print(f"{dst}: {n} counting prompts ({style} prompt)")
+PY
+  DATASETS+=("$RUN/rl_data/$a.jsonl")
 done
 STEPS=${RL_STEPS:-200}; GEN=${RL_GENERATIONS:-8}; PROMPTS=${RL_PROMPTS:-8}
 VLLM=(--use_vllm false)
@@ -86,4 +109,4 @@ MERGED=$(dirname "$(ls -d "$RUN"/v*/checkpoint-*-merged/.complete | sort -V | ta
 echo "merged model: $MERGED"
 [[ "${SKIP_EVAL:-0}" == 1 ]] && exit 0
 wait_for_gpu 16
-EVAL_GPU_UTIL=$(eval_gpu_util) tools/eval_suite.sh "$DATA" "$MERGED"
+PROMPT_STYLE=$STYLE EVAL_GPU_UTIL=$(eval_gpu_util) tools/eval_suite.sh "$DATA" "$MERGED"

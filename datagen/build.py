@@ -28,7 +28,7 @@ T0_COUNT_PAIRS = {"traffic_light": 500, "snowflake": 500}
 E2_VOLUME = 4  # C-L0x4 / C-L2x4 volume arms (§5.8)
 E2_COUNT_FAMILIES = {"stop_sign": (-2, -1, 1, 2), "clock_numerals": (-1, -2, -3)}  # §5.2 Δ per family
 T2_COLOR_PAIRS = 500
-STEPS = ["shared", "e1", "t0", "e2", "l2", "real", "parts"]
+STEPS = ["shared", "e1", "t0", "e2", "l2", "real", "parts", "parts2"]
 
 
 def available_ram_gb():
@@ -230,7 +230,8 @@ def preflight(steps):
 STEP_POOLS = {"shared": ["shared_range"], "e1": ["e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict",
                "e1/val_neutral", "e1/val_shared"], "t0": ["tests/T0/count"], "e2": ["e2/L0/count"],
                "l2": ["e2/L2/color", "tests/T2/color"], "real": ["real/count", "tests/R/count"],
-               "parts": ["parts/count", "parts/conflict", "tests/P/count", "tests/P/conflict"]}
+               "parts": ["parts/count", "parts/conflict", "tests/P/count", "tests/P/conflict"],
+               "parts2": ["parts/conflict_v2"]}
 
 
 def fingerprint(step):
@@ -277,6 +278,12 @@ def build_parts():
     parts.build()
 
 
+def build_parts2():
+    """v2 leg edit pairs (add-heavy, foot points), training only; needs the parts sources (build parts first)."""
+    from . import parts
+    parts.build_v2()
+
+
 def build(steps=None, skip_up_to_date=False):
     preflight(steps or STEPS)
     for step in steps or STEPS:
@@ -284,6 +291,6 @@ def build(steps=None, skip_up_to_date=False):
             print(f"{step}: up to date, skipped")
             continue
         {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2,
-         "real": build_real, "parts": build_parts}[step]()
+         "real": build_real, "parts": build_parts, "parts2": build_parts2}[step]()
         REPORTS.mkdir(parents=True, exist_ok=True)
         (REPORTS / f"step_{step}.json").write_text(json.dumps({"fingerprint": fingerprint(step)}))

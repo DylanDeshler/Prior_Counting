@@ -91,6 +91,17 @@ def deepest_point(mask):
     return float(x), float(y)
 
 
+def foot_point(mask):
+    """Point near the bottom of a leg (v2 targets): the deepest point of the lowest quarter of the mask.
+    The base model points at the feet, where legs separate; mid-leg points (v1) land where legs overlap."""
+    ys = np.nonzero(mask)[0]
+    if not len(ys):
+        return deepest_point(mask)
+    band = mask.copy()
+    band[: ys.min() + int(0.75 * (ys.max() - ys.min()))] = False
+    return deepest_point(band if band.any() else mask)
+
+
 def to_crop(mask, crop):
     x, y, s = crop
     m = Image.fromarray(mask[y:y + s, x:x + s].astype(np.uint8) * 255).resize((IMG, IMG), Image.NEAREST)
@@ -132,29 +143,33 @@ def apply_edit(img, legs, e):
     raise ValueError(op)
 
 
-def plan_add(legs, obj_mask, crop, rng, others_mask):
+def plan_add(legs, obj_mask, crop, rng, others_mask, wide=False):
     """A leg and a horizontal offset where the copy sits inside the crop, clear of the other legs, mostly
-    below the body (not pasted over the torso/head)."""
+    below the body (not pasted over the torso/head). wide (v2): more offsets, small vertical jitter and a
+    looser body-overlap limit, so fewer add edits are infeasible."""
     body = obj_mask & ~np.logical_or.reduce(legs)
     near = dilate(np.logical_or.reduce(legs), 3)
+    factors = [0.8, -0.8, 1.1, -1.1, 1.4, -1.4] + ([0.6, -0.6, 1.7, -1.7, 2.0, -2.0] if wide else [])
     for leg in rng.permutation(len(legs)):
         m = legs[leg]
         ys, xs = np.nonzero(m)
-        wd = xs.max() - xs.min() + 1
-        for f in rng.permutation([0.8, -0.8, 1.1, -1.1, 1.4, -1.4]):
-            dx, dy = int(round(f * wd)), 0
-            new, kept = shift(m, dx, dy)
-            if kept < 0.999 or in_crop_frac(new, crop) < 0.999:
-                continue
-            area = new.sum()
-            if (new & near).sum() > 0.02 * area or (new & body).sum() > 0.30 * area or (new & others_mask).sum() > 0.02 * area:
-                continue
-            # attached: the top of the copied leg must touch the body, or it reads as a separate object
-            nys = np.nonzero(new)[0]
-            top = new.copy(); top[nys.min() + max(2, int(0.15 * (nys.max() - nys.min() + 1))):] = False
-            if not (dilate(top, 4) & body).any():
-                continue
-            return {"op": "add", "leg": int(leg), "dx": dx, "dy": dy}
+        wd, ht = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+        for f in rng.permutation(factors):
+            for dy in ([0, int(0.03 * ht), -int(0.03 * ht)] if wide else [0]):
+                dx = int(round(f * wd))
+                new, kept = shift(m, dx, dy)
+                if kept < 0.999 or in_crop_frac(new, crop) < 0.999:
+                    continue
+                area = new.sum()
+                if (new & near).sum() > 0.02 * area or (new & body).sum() > (0.40 if wide else 0.30) * area \
+                        or (new & others_mask).sum() > 0.02 * area:
+                    continue
+                # attached: the top of the copied leg must touch the body, or it reads as a separate object
+                nys = np.nonzero(new)[0]
+                top = new.copy(); top[nys.min() + max(2, int(0.15 * (nys.max() - nys.min() + 1))):] = False
+                if not (dilate(top, 4) & body).any():
+                    continue
+                return {"op": "add", "leg": int(leg), "dx": dx, "dy": dy}
     return None
 
 
@@ -278,7 +293,8 @@ def finalize(rec, write=True):
     crop = rec["render"]["params"]["crop"]
     masks = [to_crop(m, crop) for m in legs]
     masks = [m for m in masks if m.any()]
-    pts = [deepest_point(m) for m in masks]
+    anchor = foot_point if rec["render"]["params"].get("anchor") == "foot" else deepest_point
+    pts = [anchor(m) for m in masks]
     sizes = [float(np.sqrt(m.sum())) for m in masks]
     order = reading_order(pts, float(np.median(sizes)) if sizes else 1.0)
     rec["answer"] = len(masks)
@@ -307,8 +323,10 @@ def count_job(args):
 
 
 def pair_job(args):
-    """Even idx: add a leg; odd idx: remove one (falls back to the other kind if infeasible)."""
-    c, dataset, out, idx = args
+    """v1: even idx adds a leg, odd idx removes one (falling back to the other kind if infeasible).
+    v2 (opts): the job's kind only (no fallback, so the add share stays high), wide add search, foot points."""
+    c, dataset, out, idx, *rest = args
+    opts = rest[0] if rest else {}
     rng = rng_for(item_seed(dataset, c["class"], idx))
     o = pp.load(c["image_id"])[c["obj"]]
     legs = [o["units"]["leg"][k] for k in sorted(o["units"]["leg"])]
@@ -316,9 +334,10 @@ def pair_job(args):
     for j, p in enumerate(pp.load(c["image_id"])):
         if j != c["obj"]:
             others |= p["mask"]
-    kinds = ("add", "remove") if idx % 2 == 0 else ("remove", "add")
+    kinds = opts.get("kinds") or (("add", "remove") if idx % 2 == 0 else ("remove", "add"))
     for kind in kinds:
-        edit = plan_add(legs, o["mask"], c["crop"], rng, others) if kind == "add" else plan_remove(legs, rng)
+        edit = plan_add(legs, o["mask"], c["crop"], rng, others, wide=opts.get("wide", False)) if kind == "add" \
+            else plan_remove(legs, rng)
         null = plan_null(kind, legs, o["mask"] | others, c["crop"], rng, edit) if edit else None
         if edit and null:
             break
@@ -330,6 +349,9 @@ def pair_job(args):
     delta = 1 if edit["op"] == "add" else -1
     recs = [make_record(c, dataset, out, idx, "canonical", null, comp, pid, c["canonical"], 0, template),
             make_record(c, dataset, out, idx, "counterfactual", edit, comp, pid, c["canonical"], delta, template)]
+    if opts.get("anchor"):
+        for r in recs:
+            r["render"]["params"]["anchor"] = opts["anchor"]
     try:
         recs = [finalize(r) for r in recs]
     except Exception as e:
@@ -339,7 +361,7 @@ def pair_job(args):
         return [], f"count check failed ({can['answer']}, {cf['answer']})"
     # the edit must actually change pixels where it says it does
     a, b = (np.asarray(Image.open(DATA / r["image"]).convert("L"), np.int16) for r in recs)
-    if np.abs(a - b).mean() < 0.3:
+    if (np.abs(a - b) > 12).sum() < 150:  # at least ~150 px visibly changed (a mean over the image misses small legs)
         return [], "edit not visible"
     return recs, None
 
@@ -375,4 +397,30 @@ def build(limit=None):
     report["seconds"] = round(time.time() - t, 1)
     REPORTS.mkdir(parents=True, exist_ok=True)
     (REPORTS / "build_parts.json").write_text(json.dumps(report, indent=1, default=dict))
+    return report
+
+
+V2_POOL = ("parts/conflict_v2", "parts_conflict_v2")
+V2_SCHEDULE = ("add", "add", "remove")  # per fully visible animal: two add pairs, one remove pair
+
+
+def build_v2(limit=None):
+    """Training-only v2 edit pairs (2026-11-10), evaluated on the unchanged v1 tests (tests/P/*):
+      - add-heavy: per animal two add jobs and one remove job, no fallback between kinds (v1 had 14% five-legged
+        images vs 75% in VLMBias animals), with a wider add search so fewer adds are infeasible;
+      - foot-anchored points (v1 targets sat mid-leg, where legs overlap; the base model points at the feet).
+    Same edits otherwise (copy-paste add, Telea remove, background null edits): v2 tests the data mix and
+    point placement, not edit realism."""
+    t = time.time()
+    cands = [c for c in candidates() if c["split"] == "train" and c["edit_ok"]]
+    out, dataset = V2_POOL
+    jobs = [(c, dataset, out, i, {"kinds": (V2_SCHEDULE[i % 3],), "wide": True, "anchor": "foot"})
+            for i, c in enumerate(c for c in cands for _ in V2_SCHEDULE)][:limit]
+    recs, dropped = run(pair_job, jobs, dataset)
+    write_jsonl(DATA / out / "records.jsonl", recs)
+    report = {"animals": len(cands), "jobs": len(jobs), "records": len(recs), "dropped": dict(dropped),
+              "answers": dict(sorted(Counter(r["answer"] for r in recs).items())),
+              "edits": dict(Counter(r["edit"]["op"] for r in recs)), "seconds": round(time.time() - t, 1)}
+    (REPORTS / "build_parts_v2.json").write_text(json.dumps(report, indent=1, default=dict))
+    print(f"{out}: {len(recs)} images from {len(jobs)} jobs; answers {report['answers']}; dropped {dict(dropped)}")
     return report

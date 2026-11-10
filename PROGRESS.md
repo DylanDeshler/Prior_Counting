@@ -397,7 +397,8 @@ VLMBias animals and VLMBias excluding animals separately, so in-category gains a
 | real-point s0 | 30.4 | 22.5 | 51.1 | 71.8 |
 | part-conflict-point s0 | 38.8 | **29.5** | 63.2 | 78.5 |
 
-- Best trained arm; level with prompting overall, with no pointing instruction at eval time.
+- Ties prompting overall (no pointing instruction at eval time), but see the corrected reading in §3.2h:
+  worse than prompting on animals, better outside them; net zero.
 - **Transfer outside animals** (the arm trains on animal legs, so this is the clean number): vs the prompted
   base on 1,446 non-animal items it fixes 233 and breaks 153 (sign test p = 5e-5). Gains on logos, grids,
   flags.
@@ -421,6 +422,84 @@ VLMBias animals and VLMBias excluding animals separately, so in-category gains a
 **real-point overfitting sweep:** real/val accuracy 69.0 / 68.0 / 71.0 / 70.3 at steps 100 / 200 / 350 / 442
 (point F1 0.85 → 0.87); T0 counterfactual 59 / 65 / 63 / 62. Flat after ~25% of training: no overfitting
 on held-out real photos, and no gain from training longer.
+
+### 3.2h All three part arms (2026-11-10, seed 0)
+
+**Reading (corrected 2026-11-10):** against the right baseline, the base model prompted to point, no part arm
+is better. The best (part-conflict-point) ties overall (38.8 vs 39.0, net -5 items): it is WORSE on animals,
+the category it trained on (63.2 vs 78.8, net -85 items), and better outside animals (29.5 vs 24.0, net +80,
+p = 5e-5). Training moves errors around rather than removing them, and the in-category loss is a warning
+sign about the training data (our local leg edits / "visible legs" phrasing vs VLMBias's generated animals).
+Comparisons to the unprompted base below ("fixes animals", "+12 pts") overstate the effect.
+
+**Why animals got worse (diagnosis):** 153 of the 155 animal items the arm broke (vs the prompted base) are
+5-legged animals answered "4". The prompted base points along the feet (mean point y 804 on the 0-1000 grid);
+the trained arm points mid-leg (mean y 628). Our training targets are each leg mask's deepest point, on
+average 43% of the way down the leg, where legs overlap in side views; the model learned to point there and
+then merges legs. Candidate fix: anchor each leg point at the foot (the deepest point within the lowest
+quarter of the leg mask). A second possible factor: half the animal answers in the pairs are the canonical 4.
+
+| model | VLMBias | animals | excl. animals | canonical | balanced | T0 cf | color cf | held-out visible legs | held-out leg edits cf |
+|---|---|---|---|---|---|---|---|---|---|
+| base | 12.7 | 0.0 | 17.4 | **96.9** | 54.8 | 47.3 | **95.2** | (pending) | (pending) |
+| base + point-then-total | **39.0** | **78.8** | 24.0 | 79.1 | 59.1 | 61.1 | 95.2 | (pending) | (pending) |
+| part-conflict-count (edits, number) | 30.1 | 67.8 | 15.8 | 92.0 | **61.0** | – | – | – | – |
+| part-neutral-point (natural, points) | 21.4 | 9.0 | 26.1 | 80.4 | 50.9 | 74.3 | 59.8 | **66.0** | 32.4 |
+| part-conflict-point (edits, points) | 38.8 | 63.2 | **29.5** | 78.5 | 58.6 | **78.7** | 37.5 | 52.0 | **56.3** |
+
+- **Edit pairs carry the in-category fix:** part-conflict-count takes animals from 0 to 67.8 (vs base: 370
+  fixed, 0 broken) while keeping canonical at 92.0, inside the guardrail: the best balanced accuracy of
+  any model. Outside animals it does not transfer (15.8 vs base 17.4, p = 0.16; vs C-count 80 fixed,
+  192 broken).
+- **The point format carries the transfer:** with the same pairs, point targets give 29.5 outside animals
+  (part-conflict-point; vs prompted base p = 5e-5).
+- **Natural visible-leg counts hurt VLMBias animals** (9.0): the model learns "count the visible legs" and
+  undercounts the edited animals. Outside animals 26.1 (n.s. vs the prompted base, p = 0.11).
+- **Format collapse:** every point-trained part arm answers every question with a point list, including
+  color questions ("Total: {total: 1, colored: 1}"); T2 color falls to 37.5 / 59.8. They only ever saw
+  counting questions. Fix queued: `part-conflict-point-mixq` = the leg pairs + real-photo color
+  questions with "{color}" targets (0.5 x as many).
+- **Overfitting sweep (part-conflict-point):** real/val 52.3 / 51.3 / 52.3 at steps 50 / 100 / 112; T0 cf
+  79.1 / 78.8 / 78.7. Flat: nothing gained or lost after the first half-epoch.
+- Held-out leg tests for the base model come with the next real-sweep.
+
+### 3.2i Diagnosis and the revised plan (2026-11-10)
+
+**Goal restated:** find the training setup that makes the model count, not realistic VLMBias-style
+counterfactuals. Before more data, establish where the count is lost.
+
+**Parsing audit:** clean. Unparsed and truncated answers are under 1% on every set; stored scores equal a
+fresh re-score everywhere; list length vs stated total differ on 9% of VLMBias items, and scoring by list
+length (41.2) would not change the conclusion.
+
+**The part arm fails its own held-out edits** (tests/P/conflict, same pipeline as training):
+
+| item | part-conflict-point | part-conflict-count | part-neutral-point |
+|---|---|---|---|
+| unedited 4 legs | 74% | 87% | 69% |
+| one leg removed (3) | 61% | 83% | 40% |
+| one leg added (5) | **37%** | 51% | **0%** |
+
+VLMBias animals are 75% five-legged (408 / 546); v1 training had 14% five-legged images (246 / 1,772) and
+34% canonical 4s, and its point targets sat mid-leg. Number targets learn the edits better than point
+targets, consistent with the point-placement problem.
+
+**New real-photo numbers:** base (plain prompt) 37.7, C-count 45.6, C-blind 44.3, part-conflict-count 49.8.
+C-blind (gray training images) gaining +6.6 means part of any real-photo gain is answer calibration (the
+base undercounts by 9 to 1).
+
+**Revised queue:**
+1. `probe` (tools/probe_vision.py; base, part-conflict-point, part2-conflict-point): leg probe on image-token
+   states by layer (AUC on held-out photos), probe score of pasted legs vs real legs split by whether the
+   model answered right, logit lens of true vs familiar count by layer on VLMBias, saliency gallery. Smoke
+   test on Qwen3.5-0.8B: leg-probe AUC 0.87 from 16 training images, pasted legs score like real ones.
+2. Data v2 (`parts.build_v2`, arms `part2-conflict-point` / `part2-conflict-count`): two add pairs and one
+   remove pair per animal with no fallback (local sample: ~70% of pairs add a leg), wider add search,
+   foot-anchored points, color questions mixed in (0.5x) against format collapse. Same held-out tests as v1.
+   Pass bar: clearly above 37% on its own held-out five-leg edits before VLMBias is considered.
+3. Prompt study, then GRPO starting from the base model with the point-then-total prompt (strongest
+   condition), on the v2 pairs (counting rows only).
+4. Generative edits only if v2 still fails in-domain (the edits would then be the problem).
 
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 

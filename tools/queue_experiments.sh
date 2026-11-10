@@ -15,7 +15,9 @@
 #                                    model (plain and point-then-total prompts) and every trained arm lacking them
 #   prompt <model> <style>           prompt study: VLMBias main + original only; styles cot, debias, cot-debias,
 #                                    point-debias (answer_parsing.PROMPT_SUFFIXES), or think (thinking mode)
-#   rl <start_run>                   GRPO on top of a trained arm (tools/train_rl.sh), then the core suite
+#   rl <start>                       GRPO (tools/train_rl.sh): "base" = base + point-then-total prompt, or a run name
+#   probe <model>                    interpretability (tools/probe_vision.py): leg probe on image tokens, added-leg
+#                                    scores, logit lens, saliency; <model> is "base" or a run name
 #   sweep <run>                      overfitting check: accuracy at 25/50/75/100% of training on held-out real
 #                                    photos (real/val) and held-out synthetic families (tools/ckpt_sweep.sh)
 # The real-photo counting pool is built first, on its own (it needs a lot of RAM; running it next to a
@@ -47,13 +49,19 @@ JOBS=(
   "train part-neutral-point  points 0"
   "train part-conflict-count number 0"
   "real-sweep"
+  "probe base"
+  "train part2-conflict-point points 0"
+  "train part2-conflict-count number 0"
+  "probe part-conflict-point-points-qwen3.5-s0"
+  "probe part2-conflict-point-points-qwen3.5-s0"
+  "real-sweep"
   "prompt base                                  cot"
   "prompt base                                  debias"
   "prompt base                                  cot-debias"
   "prompt base                                  point-debias"
   "prompt base                                  think"
   "prompt part-conflict-point-points-qwen3.5-s0 debias"
-  "rl    part-conflict-point-points-qwen3.5-s0"
+  "rl    base"
   "train real-mixed      mixed  0"
   "eval  real-mixed-mixed-qwen3.5-s0            direct"
   "sweep real-mixed-mixed-qwen3.5-s0"
@@ -107,10 +115,15 @@ if [[ ! -f "$DATA/tests/P/conflict/records.jsonl" ]]; then
   step "build the real-photo part-counting pools (Pascal-Part; CPU only, before the GPU jobs)"
   uv run python -m datagen --data "$DATA" build parts || echo "WARNING: part-counting build failed; part- jobs will be skipped"
 fi
+# v2 leg pairs (add-heavy, foot points; parts.build_v2): CPU only, uses the Pascal-Part sources above.
+if [[ -f "$DATA/tests/P/conflict/records.jsonl" && ! -f "$DATA/parts/conflict_v2/records.jsonl" ]]; then
+  step "build the v2 leg edit pairs (CPU only)"
+  uv run python -m datagen --data "$DATA" build parts2 || echo "WARNING: v2 leg pairs failed; part2- jobs will be skipped"
+fi
 # Re-export when an export layout changed (fast; train files of existing arms stay byte-identical):
 # the held-out real-photo validation set (real/val, the validation loss of every arm) and real-only arms.
 if [[ ! -f "$DATA/real/val/records.jsonl" || ! -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" \
-      || ( -f "$DATA/parts/count/records.jsonl" && ! -f "$DATA/exports/part-neutral-point/qwen3.5/points/train.jsonl" ) \
+      || ( -f "$DATA/parts/conflict_v2/records.jsonl" && ! -f "$DATA/exports/part2-conflict-point/qwen3.5/points/train.jsonl" ) \
       || ( -f "$DATA/exports/part-conflict-point/qwen3.5/points/train_rl.jsonl" \
            && ! $(head -c 4000 "$DATA/exports/part-conflict-point/qwen3.5/points/train_rl.jsonl" | grep -c unit_size) -gt 0 ) ]]; then
   step "export training data"
@@ -174,13 +187,29 @@ for job in "${JOBS[@]}"; do
     done
   elif [[ "$KIND" == rl ]]; then
     tag="rl $A"
-    [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
-    m=$(merged_of "$A-grpo")
-    if [[ -n "$m" ]] && (( $(summaries "$A-grpo-$(basename "$m" | sed 's/checkpoint-/ckpt/')") >= 4 )); then
+    if [[ "$A" == base ]]; then R=base-pointT-grpo; T=+pointT
+    else
+      [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+      R="$A-grpo"; T=""
+    fi
+    m=$(merged_of "$R")
+    if [[ -n "$m" ]] && (( $(summaries "$R-$(basename "$m" | sed 's/checkpoint-/ckpt/')$T") >= 4 )); then
       STATUS+=("$tag: already done"); continue
     fi
     step "$tag"
     tools/train_rl.sh "$DATA" "$A"; rc=$?
+  elif [[ "$KIND" == probe ]]; then
+    tag="probe $A"
+    if [[ "$A" == base ]]; then MODEL=$BASE NAME=Qwen3.5-4B
+    else
+      MODEL=$(merged_of "$A")
+      [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+      NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
+    fi
+    [[ -f "$DATA/reports/probe/$NAME/probe.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    step "$tag"
+    wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
+    uv run tools/probe_vision.py --data "$DATA" --model "$MODEL"; rc=$?
   elif [[ "$KIND" == sweep ]]; then
     tag="sweep $A"
     [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }

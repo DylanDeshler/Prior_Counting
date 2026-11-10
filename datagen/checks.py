@@ -21,13 +21,13 @@ from .items import render_clean, render_record
 
 POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict", "e1/val_neutral", "e1/val_shared",
          "tests/T0/count", "e2/L0/count", "e2/L2/color", "tests/T2/color", "real/count", "tests/R/count",
-         "parts/count", "parts/conflict", "tests/P/count", "tests/P/conflict"]
+         "parts/count", "parts/conflict", "tests/P/count", "tests/P/conflict", "parts/conflict_v2"]
 TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L2/color", "real/count",
-               "parts/count", "parts/conflict"]
+               "parts/count", "parts/conflict", "parts/conflict_v2"]
 # Deliberate deviation (2026-11-10): the Pascal-Part pools count animal LEGS, which the spec keeps out of
 # training (VLMBias "animals" topic). They are exempt from the category-term check; results report VLMBias
 # with and without the animal topic so in-category gains are never read as transfer.
-CATEGORY_EXEMPT = ("parts/count", "parts/conflict")
+CATEGORY_EXEMPT = ("parts/count", "parts/conflict", "parts/conflict_v2")
 
 # Allowed Δ per family (§4.2, §5.2). Fixed-canonical families use exactly these values, uniformly.
 FIXED_DELTAS = {"clock": {-3, -2, -1, 1, 2, 3}, "stop_sign": {-3, -2, -1, 1, 2, 3}, "calendar": {-3, -2, -1, 1, 2, 3},
