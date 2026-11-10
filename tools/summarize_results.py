@@ -60,6 +60,8 @@ def main(results="results"):
             topics = s.get("by_topic", {})
             r["val_c"] = topics.get("e1_val_conflict", s["overall"])["accuracy"]
             r["val_s"] = topics.get("e1_val_shared", {}).get("accuracy")
+    # Intermediate checkpoints from tools/ckpt_sweep.sh have only real/val + T0: shown by the sweep, not here.
+    rows = {m: r for m, r in rows.items() if not re.search(r"-ckpt\d+-merged", m) or "vlm_acc" in r}
     if not rows:
         print("no results yet")
         return

@@ -6,12 +6,13 @@ reward function. Output is byte-identical for identical records: rows are ordere
 (arm, id), JSON is written with fixed key order, and coordinates are integers.
 """
 
+import hashlib
 import json
 
 from PIL import Image
 from tqdm import tqdm
 
-from .common import DATA, IMG, item_seed, load_params, read_jsonl, rng_for
+from .common import DATA, IMG, item_seed, load_params, read_jsonl, rng_for, write_jsonl
 
 MODELS = ("qwen3.5", "qwen2.5-vl")
 EXPORTS = DATA / "exports"
@@ -31,12 +32,33 @@ E1_ARMS = {
     # pointing prompt -> point list + "Total: {N}", or the plain question -> "{N}".
     "conflict-mixed": (["e1/conflict"], ["e1/val_conflict"], "mixed", False, None),
     "neutral-mixed": (["e1/neutral"], ["e1/val_neutral"], "mixed", False, None),
-    # Real-photo counting (unedited LVIS crowds) with ground-truth points: grounding on photos.
+    # Real-photo counting (unedited LVIS crowds) with ground-truth points: grounding on photos. Real photos
+    # only: no synthetic shared block (REAL_ONLY), so they test pointing without synthetic layouts.
     "real-count": (["real/count"], [], "number", False, None),
     "real-point": (["real/count"], [], "points", False, None),
     "real-mixed": (["real/count"], [], "mixed", False, None),
 }
 SHARED, VAL_SHARED = "shared_range", "e1/val_shared"
+REAL_ONLY = ("real-",)
+# Out-of-distribution validation for every arm: real-photo crops held out of real/count (never trained on,
+# disjoint from tests/R/count). Its loss is logged every 50 steps during training, so overfitting to the
+# synthetic layouts shows up as a rising real-photo loss; the checkpoint sweep scores its accuracy.
+REAL_POOL, REAL_VAL, REAL_VAL_N = "real/count", "real/val", 300
+
+
+def real_val_ids():
+    """Write real/val/records.jsonl (REAL_VAL_N records of real/count chosen by a stable hash of the id) and
+    return their ids. None if the real pool is not built."""
+    path = DATA / REAL_POOL / "records.jsonl"
+    if not path.exists():
+        return None
+    recs = read_jsonl(path)
+    pick = sorted(recs, key=lambda r: hashlib.sha256(r["id"].encode()).hexdigest())[:REAL_VAL_N]
+    out = DATA / REAL_VAL / "records.jsonl"
+    if not out.exists() or [r["id"] for r in read_jsonl(out)] != [r["id"] for r in pick]:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(out, pick)
+    return {r["id"] for r in pick}
 
 
 def model_point(model, x, y, fmt):
@@ -119,13 +141,19 @@ def export_arm(arm, train, val, fmt, blind, point_fmt):
 
 def export_e1(point_fmt, only=None):
     shared, val_shared = load(SHARED), load(VAL_SHARED)
+    held = real_val_ids()
+    real_val = load(REAL_VAL) if held else None
     arms = {a: v for a, v in E1_ARMS.items() if only is None or a.startswith(only)}
     for arm, (pools, val_pools, fmt, blind, fam) in tqdm(arms.items(), desc="Exp 1 arms", unit="arm"):
         if not all((DATA / p / "records.jsonl").exists() for p in pools):
             print(f"{arm:<20} skipped: pool not built ({', '.join(pools)})")
             continue
-        train = [r for p in pools for r in load(p, fam)] + shared
-        val = [r for p in val_pools for r in load(p, fam)] + val_shared
+        train = [r for p in pools for r in load(p, fam) if not (held and r["id"] in held)]
+        if not arm.startswith(REAL_ONLY):
+            train += shared
+        # Validation loss on held-out real photos when available (out of distribution for the synthetic
+        # arms); in-distribution synthetic accuracy is measured after training by the eval suite.
+        val = real_val if real_val else [r for p in val_pools for r in load(p, fam)] + val_shared
         n = export_arm(arm, train, val, fmt, blind, point_fmt)
         print(f"{arm:<20} {fmt:<11} {n} train rows")
 

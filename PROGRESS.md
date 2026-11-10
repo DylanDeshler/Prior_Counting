@@ -268,7 +268,7 @@ Base model, counting items, rescored with the parser fix for bare `Total: N` lin
 | prompt | VLMBias acc / bias | Orig (canonical) | Balanced | T0 can / cf / bias | Val conflict / shared | Real count (list acc, point F1) |
 |---|---|---|---|---|---|---|
 | default | 12.7 / 73.4 | 96.9 | 54.8 | 99.8 / 47.3 / 42.4 | 61.4 / 8.9 | (real-sweep pending) |
-| direct (number only) | 9.0 / 73.1 | (running) | | | | |
+| direct (number only) | 9.0 / 73.1 | 95.1 | 52.1 | 99.4 / 52.4 / 35.9 | 64.6 / 5.7 | 37.2 |
 | point-then-total | **39.0 / 26.1** | 79.1 | 59.1 | 71.5 / 61.1 / 5.3 | 46.1 / 19.6 | 47.1 (47.1, F1 77.1) |
 
 - **Pointing with a stated total roughly triples VLMBias accuracy** (660 items gained, 150 lost vs default)
@@ -281,8 +281,48 @@ Base model, counting items, rescored with the parser fix for bare `Total: N` lin
   (list bias 23%): the prior acts mainly while enumerating, not as an override of a correct list.
 - **Forced direct answers are slightly worse than the default prompt** (9.0 vs 12.7, same bias): the
   short reasoning the model writes by default helps a little; prior override is not about verbosity.
-- **Real-photo counting (1,754 held-out crops, 3–15 instances):** 47% exact with pointing, point F1 0.77,
-  so the model finds most instances but miscounts often. Plain-prompt number pending (real-sweep).
+- **Real-photo counting (1,754 held-out crops, 3–15 instances):** 47% exact with pointing (point F1 0.77)
+  vs 37% with direct answers; pointing wins in every count bin (net +174 items). But direct accuracy is
+  only 41% on crops with 3–4 instances, and 89% of direct errors are undercounts: many LVIS "instances"
+  are probably too small or occluded to count. Treat tests/R/count as unaudited until Gate 4; 78% of
+  items have 3–4 instances (count distribution is skewed low).
+
+### 3.2d C-point s0 (2026-11-09): point-then-count training on conflict pairs (H3b)
+
+Plain prompts (the arm answers with a point list + `Total: {N}` by default):
+
+| model | VLMBias acc / bias | Orig | Balanced | T0 can / cf / bias | T0 point F1 | T2 cf | Val conflict / shared | Real count (F1) |
+|---|---|---|---|---|---|---|---|---|
+| base, default prompt | 12.7 / 73.4 | 96.9 | 54.8 | 99.8 / 47.3 / 42.4 | – | 95.2 | 61.4 / 8.9 | – |
+| base, point-then-total prompt | **39.0** / 26.1 | 79.1 | **59.1** | 71.5 / 61.1 / 5.3 | 47.1 | 95.2 | 46.1 / 19.6 | **47.1** (77.1) |
+| C-count s0 | 20.6 / 56.6 | **92.0** | 56.3 | 99.1 / 75.7 / 12.6 | – | 95.2 | 93.1 / 31.2 | – |
+| C-point s0 | 28.4 / 26.1 | 72.4 | 50.4 | 95.2 / **88.7 / 1.2** | **90.0** | 82.1 | 93.4 / **73.2** | 44.4 (77.4) |
+
+- **Synthetic: large gains.** Held-out families (T0) counterfactual accuracy 88.7 with 1% bias, point F1
+  47 to 90; the hard 12–51 shared block goes from 9–31 to 73.
+- **VLMBias: better than C-count, worse than just prompting the base model to point** (28.4 vs 39.0), and
+  canonical accuracy falls to 72.4 (fails the 5-point guardrail). Most of the loss is Animal Add Legs
+  (546 items): 78.8 with the base pointing prompt, 40.5 for C-point (40% of animal answers are the familiar
+  count). Some point lists are regular lattices (e.g. 3x2 grids for a horse's legs): the arm learned the
+  synthetic layouts' geometry along with pointing. It gains on board grids (sudoku 25 to 79, chess grid
+  2 to 58) and chess/xiangqi pieces.
+- **Format collapse:** the arm points on every question, including color questions ("Total: {1}" for
+  "What color is the egg?", T2 95 to 82) and when told to answer with a number only (the +direct run
+  still points 100% of the time). So C-point cannot test H3c; the mixed-format arms (half plain-number
+  targets) are the distillation test.
+- **Real photos:** unchanged (44.4 vs 47.1 base pointing; point F1 equal), so real-photo grounding
+  neither improved nor broke.
+- Reading for H3b: point-then-count training fixes counting within the synthetic distribution almost
+  completely but does not transfer to VLMBias beyond what the pointing prompt already gives. Next checks:
+  N-point (does conflict data matter), mixed arms (format collapse, H3c), real-point (does real-photo
+  pointing transfer), and an earlier checkpoint (epoch 1) to test overfitting to the synthetic layouts.
+- **Decision (2026-11-09): real-photo pointing next, and overfitting made measurable.** Real arms
+  (real-point, real-mixed, real-count) now train on real photos only (no synthetic shared block). Every
+  E1 arm's validation set is 300 held-out real photos (real/val, excluded from real/count training,
+  disjoint from tests/R/count); its loss is logged every 50 steps. Checkpoints are all kept, and
+  `tools/ckpt_sweep.sh` scores real/val and T0 accuracy at 25/50/75/100% of training (the queue runs it
+  after each new arm). C-point's intermediate checkpoints were already deleted (old limit of 2), so its
+  overfitting curve needs a retrain (seed 1 is queued).
 
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 

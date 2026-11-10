@@ -35,7 +35,11 @@ PY
 }
 [[ "$BATCH" == auto ]] && BATCH=$(pick_batch)
 [[ -f "$EXP/train.jsonl" ]] || { echo "missing $EXP/train.jsonl (run: python -m datagen --data $DATA export)"; exit 1; }
-VAL=(--eval_strategy no); [[ -f "$EXP/val.jsonl" ]] && VAL=(--val_dataset "$EXP/val.jsonl" --eval_strategy epoch)
+# Validation loss every 50 steps (same as the checkpoints). For E1 arms val.jsonl is 300 held-out real photos
+# (datagen/export.py REAL_VAL), so the curve shows whether training stops helping, or starts hurting, off
+# the synthetic distribution. Read it in <run>/v*/logging.jsonl (eval_loss) or the live status line.
+VAL=(--eval_strategy no)
+[[ -f "$EXP/val.jsonl" ]] && VAL=(--val_dataset "$EXP/val.jsonl" --eval_strategy steps --eval_steps 50)
 
 # ms-swift in its own isolated venv on a uv-managed Python 3.12 (Qwen3.5 needs transformers>=5.9; fla kernels
 # need 3.12). Not `uv run --with` on the system Python: that layers onto the interpreter's own site-packages,
@@ -91,10 +95,10 @@ if ! merged_done; then
       --dataset "$EXP/train.jsonl" "${VAL[@]}" ${THINK[@]+"${THINK[@]}"} \
       --torch_dtype bfloat16 --num_train_epochs 2 --learning_rate 1e-4 \
       --lr_scheduler_type cosine --warmup_ratio 0.03 \
-      --per_device_train_batch_size "$BATCH" --gradient_accumulation_steps "$ACCUM" \
+      --per_device_train_batch_size "$BATCH" --per_device_eval_batch_size "$BATCH" --gradient_accumulation_steps "$ACCUM" \
       --gradient_checkpointing true --max_length 1536 --truncation_strategy delete \
       --seed "$SEED" --data_seed "$SEED" --output_dir "$RUN" \
-      --save_strategy steps --save_steps 50 --save_total_limit 2 --logging_steps 10 \
+      --save_strategy steps --save_steps 50 --save_total_limit 20 --logging_steps 10 \
       --dataloader_num_workers 4 --dataset_num_proc 4 ${RESUME[@]+"${RESUME[@]}"} 2>&1 \
       | "$SWIFT_ENV/bin/python" tools/train_progress.py "$RUN/train_raw.log"   # one live status line; full output in the raw log
     then

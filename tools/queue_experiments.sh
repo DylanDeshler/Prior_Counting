@@ -13,6 +13,8 @@
 #                                    (e.g. conflict-point-points-qwen3.5-s0); styles: point, point-total, direct
 #   real-sweep                       real-photo counting test (tests/R/count) for the base model (plain and
 #                                    pointing prompts) and every trained arm that doesn't have it yet
+#   sweep <run>                      overfitting check: accuracy at 25/50/75/100% of training on held-out real
+#                                    photos (real/val) and held-out synthetic families (tools/ckpt_sweep.sh)
 # The real-photo counting pool is built first, on its own (it needs a lot of RAM; running it next to a
 # vLLM/training job froze the machine), then skipped on later runs.
 # Log: <data_dir>/reports/logs/queue_<timestamp>.log   Results: results/RESULTS.md, results/report.tar.gz
@@ -23,21 +25,31 @@ cd "$(dirname "$0")/.."
 source tools/common.sh
 start_log "$DATA" queue
 
-# Ordered by the pointing hypotheses (PROGRESS.md §5.0):
-#   mechanism  - base with a pointing prompt that must end in a stated total: does the list say 5 and the total 4?
-#   H3b        - point-then-count training (C-point, N-point): pointing as the default, canonicals recovered?
-#   H3c        - distillation: direct answers of point / mixed-format arms vs C-count (forced direct prompt)
-#   then the rest of the 2x2 and controls, then seeds.
+# Ordered by the pointing hypotheses (PROGRESS.md §5.0), revised 2026-11-09 after C-point: synthetic point
+# training fixed synthetic counting but did not transfer to VLMBias, so real-photo pointing runs next.
+#   mechanism  - base with a pointing prompt that must end in a stated total (done)
+#   H3b        - point-then-count training: C-point (done), then real-photo pointing (real-point, no synthetic)
+#   H3c        - distillation: direct answers of mixed-format arms (half pointing, half plain number)
+#   every new arm gets a checkpoint sweep (overfitting check), then the rest of the 2x2, controls, seeds.
+# Pure point arms skip the forced-direct eval: C-point ignored "number only" and pointed anyway.
 JOBS=(
   "eval  base                                   point-total"
   "eval  base                                   direct"
   "train conflict-point  points 0"
   "eval  conflict-point-points-qwen3.5-s0       direct"
+  "train real-point      points 0"
+  "sweep real-point-points-qwen3.5-s0"
+  "train real-mixed      mixed  0"
+  "eval  real-mixed-mixed-qwen3.5-s0            direct"
+  "sweep real-mixed-mixed-qwen3.5-s0"
+  "train real-count      number 0"
+  "real-sweep"
   "train neutral-point   points 0"
-  "eval  neutral-point-points-qwen3.5-s0        direct"
+  "sweep neutral-point-points-qwen3.5-s0"
   "train conflict-mixed  mixed  0"
   "eval  conflict-mixed-mixed-qwen3.5-s0        direct"
   "eval  conflict-mixed-mixed-qwen3.5-s0        point-total"
+  "sweep conflict-mixed-mixed-qwen3.5-s0"
   "train neutral-mixed   mixed  0"
   "eval  neutral-mixed-mixed-qwen3.5-s0         direct"
   "eval  conflict-count-number-qwen3.5-s0       direct"
@@ -46,15 +58,17 @@ JOBS=(
   "train neutral-list    list   0"
   "train dice-only       number 0"
   "train C-L0            number 0"
-  "train real-point      points 0"
-  "train real-mixed      mixed  0"
   "real-sweep"
+  "train real-point      points 1"
+  "train real-mixed      mixed  1"
   "train conflict-point  points 1"
   "train conflict-mixed  mixed  1"
   "train conflict-count  number 1"
   "train neutral-point   points 1"
   "train neutral-mixed   mixed  1"
   "train neutral-count   number 1"
+  "train real-point      points 2"
+  "train real-mixed      mixed  2"
   "train conflict-point  points 2"
   "train conflict-mixed  mixed  2"
   "train conflict-count  number 2"
@@ -66,16 +80,18 @@ JOBS=(
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found: run this on the GPU box"; exit 1; }
 echo "data dir: $DATA   jobs: ${#JOBS[@]}   log: $LOG"
 uv sync
-# New export arms (e.g. the mixed-format distillation arms) appear after a re-export; it is fast and
-# byte-identical for existing arms.
-[[ -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" ]] || uv run python -m datagen --data "$DATA" export
 
 # Real-photo counting pool: build it before any GPU job, never alongside one (see above). A failure is
 # logged and the queue continues without the real-photo jobs; rerunning retries the build.
-if [[ ! -f "$DATA/tests/R/count/records.jsonl" || ! -f "$DATA/exports/real-point/qwen3.5/points/train.jsonl" ]]; then
+if [[ ! -f "$DATA/tests/R/count/records.jsonl" ]]; then
   step "build the real-photo counting pool (CPU only, before the GPU jobs)"
-  { uv run python -m datagen --data "$DATA" build real && uv run python -m datagen --data "$DATA" export real; } \
-    || echo "WARNING: real-photo pool build failed; real-photo jobs will be skipped"
+  uv run python -m datagen --data "$DATA" build real || echo "WARNING: real-photo pool build failed; real-photo jobs will be skipped"
+fi
+# Re-export when an export layout changed (fast; train files of existing arms stay byte-identical):
+# the held-out real-photo validation set (real/val, the validation loss of every arm) and real-only arms.
+if [[ ! -f "$DATA/real/val/records.jsonl" || ! -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" ]]; then
+  step "export training data"
+  uv run python -m datagen --data "$DATA" export || echo "WARNING: export failed"
 fi
 
 merged_of() { local m; m=$(ls -d runs/"$1"/v*/checkpoint-*-merged/.complete 2>/dev/null | sort -V | tail -1); [[ -n "$m" ]] && dirname "$m"; }
@@ -106,6 +122,11 @@ for job in "${JOBS[@]}"; do
       n=$(( n + 1 ))
     done
     tag="real-sweep ($n models)"
+  elif [[ "$KIND" == sweep ]]; then
+    tag="sweep $A"
+    [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+    step "$tag"
+    tools/ckpt_sweep.sh "$DATA" "$A"; rc=$?
   elif [[ "$KIND" == train ]]; then
     ARM=$A FMT=$B SEED=$C RUN="${A}-${B}-qwen3.5-s${C}" tag="train $A/$B/s$C"
     [[ -f "$DATA/exports/$ARM/qwen3.5/$FMT/train.jsonl" ]] || { STATUS+=("$tag: skipped (no export)"); continue; }
