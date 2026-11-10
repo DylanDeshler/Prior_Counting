@@ -324,6 +324,67 @@ Plain prompts (the arm answers with a point list + `Total: {N}` by default):
   after each new arm). C-point's intermediate checkpoints were already deleted (old limit of 2), so its
   overfitting curve needs a retrain (seed 1 is queued).
 
+### 3.2e real-point s0 (2026-11-09): point-then-count on real photos only
+
+| model | VLMBias acc / bias | Orig | Balanced | T0 can / cf | Color cf | Real count (point F1) |
+|---|---|---|---|---|---|---|
+| base, point-then-total prompt | **39.0** / 26.1 | **79.1** | **59.1** | 71.5 / 61.1 | 95.2 | 47.1 (0.77) |
+| C-point s0 (synthetic) | 28.4 / 26.1 | 72.4 | 50.4 | 95.2 / 88.7 | 82.1 | 44.4 (0.77) |
+| real-point s0 (real photos, 442 steps) | 30.4 / 28.9 | 71.8 | 51.1 | 88.7 / 62.2 | 91.8 | **68.5 (0.85)** |
+
+- **In-domain gain:** held-out real-photo counting 47 → 68.5, point F1 0.77 → 0.85; color mostly intact.
+- **No VLMBias transfer:** 30.4, like C-point and below the prompted base. Animals 51 (prompted base 79);
+  39% of animal answers are still the familiar 4. Canonical 71.8 fails the guardrail.
+- **Sweep (partial):** at step 100 of 442, real/val accuracy is already 69% (final test 68.5): real-photo
+  gains come early. Remaining checkpoints running.
+- **Interpretation:** both training sources teach counting of separate objects (rendered shapes' parts are
+  synthetic; LVIS crops are whole objects). VLMBias asks for parts of one familiar object (legs, stars,
+  stripes) on realistic images. Candidate next data: part counting on real objects.
+
+### 3.2f Real-photo part counting (2026-11-10): Pascal-Part legs — built, not yet trained
+
+**Why:** synthetic training counts parts of rendered shapes; the LVIS pool counts separate whole objects.
+VLMBias counts parts of one familiar object (legs) in realistic images. Neither source covered that.
+
+**Visible vs canonical counts in natural photos** (Pascal-Part, objects with part annotations;
+`reports/pascal_part_stats.md`):
+
+| class | part | canonical | objects | = canonical | below | mean visible |
+|---|---|---|---|---|---|---|
+| horse | leg | 4 | 621 | 50.7% | 49.3% | 2.79 |
+| bird | leg | 2 | 934 | 43.8% | 56.2% | 1.03 |
+| cow | leg | 4 | 415 | 33.0% | 67.0% | 2.27 |
+| dog | leg | 4 | 1,403 | 24.7% | 75.3% | 2.27 |
+| cat | leg | 4 | 1,128 | 15.3% | 84.7% | 1.88 |
+| sheep | leg | 4 | 661 | 10.0% | 90.0% | 0.71 |
+| bicycle / motorbike | wheel | 2 | 613 / 595 | 79.6% / 69.7% | | 1.77 / 1.67 |
+| car | wheel | 4 | 1,745 | 2.8% | 97.2% | 1.36 |
+| person | leg / arm | 2 | 7,839 | 46.0% / 56.8% | | 1.06 / 1.44 |
+
+Above-canonical counts essentially never occur (1 car of 1,745). So for VISIBLE legs, "4" is usually wrong
+in natural photos: the natural version of the prior conflict.
+
+**Pools** (`datagen/parts.py`, `python -m datagen build parts`; 20% of images held out by id hash):
+- `parts/count`, `tests/P/count`: unedited crops of one animal, "How many legs of the dog can you see?",
+  a point + mask per visible leg (legs >= 150 px; animal >= 12% of the crop; no second animal of the same
+  class in the crop). About 1,450 animals in total (estimated from 19% of the images).
+- `parts/conflict`, `tests/P/conflict`: fully visible animals, two pairs each. The counterfactual has a leg
+  added (copy of the animal's own leg, feathered, attached to the body) or removed (OpenCV Telea inpainting
+  of the dilated leg mask). The canonical partner gets the same kind of edit on a leg-shaped background
+  region (null edit), so "edited" never predicts "count changed". About 950 pairs.
+- Counts are exact by construction. Local checks pass: records schema, points inside masks, re-render from
+  metadata (deterministic), no train/test image overlap.
+- Known weakness: Telea inpainting can leave a visible smudge where a leg was removed (the null edits leave
+  the same kind of smudge, so it does not predict the count). LaMa would look better.
+
+**Deviation from the spec:** the leakage rules keep "leg"/"animal"/"dog"/"cat"/"bird"/"horse" out of
+training questions. The part pools are exempt (`checks.CATEGORY_EXEMPT`), and RESULTS.md now reports
+VLMBias animals and VLMBias excluding animals separately, so in-category gains are not read as transfer.
+
+**Arms** (real photos only, no synthetic block): `part-conflict-point`, `part-neutral-point`,
+`part-conflict-count`. Queued right after the real-point sweep; `real-sweep` now also evaluates the base
+(plain and point-then-total) and every arm on `tests/P/count` and `tests/P/conflict`.
+
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
 - **Fixed-prior families reproduce the VLMBias pattern.**

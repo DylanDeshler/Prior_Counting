@@ -37,9 +37,14 @@ E1_ARMS = {
     "real-count": (["real/count"], [], "number", False, None),
     "real-point": (["real/count"], [], "points", False, None),
     "real-mixed": (["real/count"], [], "mixed", False, None),
+    # Real-photo PART counting (Pascal-Part animal legs; parts.py): natural visible-leg counts, and edit pairs
+    # (a leg added or removed, partner with a background null edit). Real photos only, like the real- arms.
+    "part-neutral-point": (["parts/count"], [], "points", False, None),
+    "part-conflict-point": (["parts/conflict"], [], "points", False, None),
+    "part-conflict-count": (["parts/conflict"], [], "number", False, None),
 }
 SHARED, VAL_SHARED = "shared_range", "e1/val_shared"
-REAL_ONLY = ("real-",)
+REAL_ONLY = ("real-", "part-")
 # Out-of-distribution validation for every arm: real-photo crops held out of real/count (never trained on,
 # disjoint from tests/R/count). Its loss is logged every 50 steps during training, so overfitting to the
 # synthetic layouts shows up as a rising real-photo loss; the checkpoint sweep scores its accuracy.
@@ -188,6 +193,6 @@ def export(which=("e1", "e2")):
     if "e1" in which:
         export_e1(point_fmt)
     elif "real" in which:  # only the real-photo arms (safe while other arms' files are being trained on)
-        export_e1(point_fmt, only="real-")
+        export_e1(point_fmt, only=REAL_ONLY)
     if "e2" in which:
         export_e2(point_fmt)

@@ -28,7 +28,7 @@ T0_COUNT_PAIRS = {"traffic_light": 500, "snowflake": 500}
 E2_VOLUME = 4  # C-L0x4 / C-L2x4 volume arms (§5.8)
 E2_COUNT_FAMILIES = {"stop_sign": (-2, -1, 1, 2), "clock_numerals": (-1, -2, -3)}  # §5.2 Δ per family
 T2_COLOR_PAIRS = 500
-STEPS = ["shared", "e1", "t0", "e2", "l2", "real"]
+STEPS = ["shared", "e1", "t0", "e2", "l2", "real", "parts"]
 
 
 def available_ram_gb():
@@ -229,7 +229,8 @@ def preflight(steps):
 
 STEP_POOLS = {"shared": ["shared_range"], "e1": ["e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict",
                "e1/val_neutral", "e1/val_shared"], "t0": ["tests/T0/count"], "e2": ["e2/L0/count"],
-               "l2": ["e2/L2/color", "tests/T2/color"], "real": ["real/count", "tests/R/count"]}
+               "l2": ["e2/L2/color", "tests/T2/color"], "real": ["real/count", "tests/R/count"],
+               "parts": ["parts/count", "parts/conflict", "tests/P/count", "tests/P/conflict"]}
 
 
 def fingerprint(step):
@@ -267,6 +268,15 @@ def build_real():
                                                "categories": len({r["family"] for r in recs})})
 
 
+def build_parts():
+    """Real-photo part counting (Pascal-Part legs): parts/count, parts/conflict, tests/P/{count,conflict}."""
+    from . import pascal_part as pp, parts
+    if not (pp.ANN.exists() and any(pp.IMAGES.glob("*.jpg"))):
+        pp.fetch()  # ~80 MB annotations + the annotated VOC 2010 images (~1.3 GB tar, streamed)
+    pp.stats()      # visible-vs-canonical part count distribution -> reports/pascal_part_stats.{json,md}
+    parts.build()
+
+
 def build(steps=None, skip_up_to_date=False):
     preflight(steps or STEPS)
     for step in steps or STEPS:
@@ -274,6 +284,6 @@ def build(steps=None, skip_up_to_date=False):
             print(f"{step}: up to date, skipped")
             continue
         {"shared": build_shared, "e1": build_e1, "t0": build_t0, "e2": build_e2, "l2": build_l2,
-         "real": build_real}[step]()
+         "real": build_real, "parts": build_parts}[step]()
         REPORTS.mkdir(parents=True, exist_ok=True)
         (REPORTS / f"step_{step}.json").write_text(json.dumps({"fingerprint": fingerprint(step)}))

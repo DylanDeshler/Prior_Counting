@@ -20,8 +20,14 @@ from .families import E1_FAMILIES, HELD_OUT
 from .items import render_clean, render_record
 
 POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e1/val_conflict", "e1/val_neutral", "e1/val_shared",
-         "tests/T0/count", "e2/L0/count", "e2/L2/color", "tests/T2/color", "real/count", "tests/R/count"]
-TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L2/color", "real/count"]
+         "tests/T0/count", "e2/L0/count", "e2/L2/color", "tests/T2/color", "real/count", "tests/R/count",
+         "parts/count", "parts/conflict", "tests/P/count", "tests/P/conflict"]
+TRAIN_POOLS = ["shared_range", "e1/conflict", "e1/neutral", "e1/dice", "e2/L0/count", "e2/L2/color", "real/count",
+               "parts/count", "parts/conflict"]
+# Deliberate deviation (2026-11-10): the Pascal-Part pools count animal LEGS, which the spec keeps out of
+# training (VLMBias "animals" topic). They are exempt from the category-term check; results report VLMBias
+# with and without the animal topic so in-category gains are never read as transfer.
+CATEGORY_EXEMPT = ("parts/count", "parts/conflict")
 
 # Allowed Δ per family (§4.2, §5.2). Fixed-canonical families use exactly these values, uniformly.
 FIXED_DELTAS = {"clock": {-3, -2, -1, 1, 2, 3}, "stop_sign": {-3, -2, -1, 1, 2, 3}, "calendar": {-3, -2, -1, 1, 2, 3},
@@ -112,7 +118,12 @@ def check_determinism(rep, pools, n=100, seed=0):
     sample = [recs[i] for i in rng.choice(len(recs), size=min(n, len(recs)), replace=False)]
     bad = []
     for r in tqdm(sample, desc="determinism (re-render)", unit="img", leave=False):
-        h = hashlib.sha256(png_bytes(render_record(r))).hexdigest()
+        if r["render"]["generator"] == "pascal_part":
+            from .parts import render as render_part
+            img = render_part(r)[0]
+        else:
+            img = render_record(r)
+        h = hashlib.sha256(png_bytes(img)).hexdigest()
         on_disk = hashlib.sha256((DATA / r["image"]).read_bytes()).hexdigest()
         if not (h == r["image_sha256"] == on_disk):
             bad.append(r["id"])
@@ -123,7 +134,9 @@ def check_determinism(rep, pools, n=100, seed=0):
 def check_pair_integrity(rep, pools, max_pairs_per_pool=300):
     bad, n = [], 0
     for pool, recs in pools.items():
-        pairs = [v for v in pairs_of(recs).values() if len(v) == 2]
+        # Pascal-Part pairs are edited in two places by design (the real edit and its background null
+        # edit); parts.pair_job checks them instead.
+        pairs = [v for v in pairs_of(recs).values() if len(v) == 2 and v[0]["render"]["generator"] != "pascal_part"]
         step = max(1, len(pairs) // max_pairs_per_pool)
         for a, b in tqdm(pairs[::step], desc=f"pair integrity {pool}", unit="pair", leave=False):
             n += 1
@@ -213,7 +226,7 @@ def check_leakage(rep, pools):
             if r["family"] in HELD_OUT or r["render"]["generator"] in HELD_OUT:
                 problems.append(f"{r['id']}: held-out family in training")
             q = r["question"].lower()
-            if any(re.search(rf"\b{re.escape(t)}s?\b", q) for t in terms):
+            if pool not in CATEGORY_EXEMPT and any(re.search(rf"\b{re.escape(t)}s?\b", q) for t in terms):
                 problems.append(f"{r['id']}: question mentions an excluded VLMBias category")
             obj = r["render"]["params"].get("object")
             if obj and (obj in held_color or obj in vcf):
@@ -223,7 +236,8 @@ def check_leakage(rep, pools):
                     problems.append(f"{r['id']}: COCO image {r['source']['image_id']} is used by an eval set")
                 if r["checks"].get("phash_min_dist", 99) <= 6:
                     problems.append(f"{r['id']}: near-duplicate of an eval image")
-    test_ids = {r["source"]["image_id"] for p in ("tests/T2/color", "tests/R/count") for r in pools.get(p, [])}
+    test_ids = {r["source"]["image_id"] for p in ("tests/T2/color", "tests/R/count", "tests/P/count", "tests/P/conflict")
+                for r in pools.get(p, [])}
     train_ids = {r["source"]["image_id"] for p in TRAIN_POOLS for r in pools.get(p, []) if r["level"] != "L0"}
     if test_ids & train_ids:
         problems.append(f"{len(test_ids & train_ids)} source photos appear in both training and a photo test set (§9.6)")

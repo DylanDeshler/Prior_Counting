@@ -11,8 +11,8 @@
 #   train <arm> <format> <seed>      train a LoRA arm, merge, evaluate on the core suite (plain prompts)
 #   eval  <model> <prompt-style>     core suite with a prompt variant; <model> is "base" or a run name
 #                                    (e.g. conflict-point-points-qwen3.5-s0); styles: point, point-total, direct
-#   real-sweep                       real-photo counting test (tests/R/count) for the base model (plain and
-#                                    pointing prompts) and every trained arm that doesn't have it yet
+#   real-sweep                       real-photo tests (tests/R/count, tests/P/count, tests/P/conflict) for the base
+#                                    model (plain and point-then-total prompts) and every trained arm lacking them
 #   sweep <run>                      overfitting check: accuracy at 25/50/75/100% of training on held-out real
 #                                    photos (real/val) and held-out synthetic families (tools/ckpt_sweep.sh)
 # The real-photo counting pool is built first, on its own (it needs a lot of RAM; running it next to a
@@ -39,6 +39,11 @@ JOBS=(
   "eval  conflict-point-points-qwen3.5-s0       direct"
   "train real-point      points 0"
   "sweep real-point-points-qwen3.5-s0"
+  "train part-conflict-point points 0"
+  "sweep part-conflict-point-points-qwen3.5-s0"
+  "train part-neutral-point  points 0"
+  "train part-conflict-count number 0"
+  "real-sweep"
   "train real-mixed      mixed  0"
   "eval  real-mixed-mixed-qwen3.5-s0            direct"
   "sweep real-mixed-mixed-qwen3.5-s0"
@@ -87,9 +92,15 @@ if [[ ! -f "$DATA/tests/R/count/records.jsonl" ]]; then
   step "build the real-photo counting pool (CPU only, before the GPU jobs)"
   uv run python -m datagen --data "$DATA" build real || echo "WARNING: real-photo pool build failed; real-photo jobs will be skipped"
 fi
+# Real-photo part counting (Pascal-Part legs): downloads ~1.4 GB once, CPU only, before the GPU jobs.
+if [[ ! -f "$DATA/tests/P/conflict/records.jsonl" ]]; then
+  step "build the real-photo part-counting pools (Pascal-Part; CPU only, before the GPU jobs)"
+  uv run python -m datagen --data "$DATA" build parts || echo "WARNING: part-counting build failed; part- jobs will be skipped"
+fi
 # Re-export when an export layout changed (fast; train files of existing arms stay byte-identical):
 # the held-out real-photo validation set (real/val, the validation loss of every arm) and real-only arms.
-if [[ ! -f "$DATA/real/val/records.jsonl" || ! -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" ]]; then
+if [[ ! -f "$DATA/real/val/records.jsonl" || ! -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" \
+      || ( -f "$DATA/parts/count/records.jsonl" && ! -f "$DATA/exports/part-neutral-point/qwen3.5/points/train.jsonl" ) ]]; then
   step "export training data"
   uv run python -m datagen --data "$DATA" export || echo "WARNING: export failed"
 fi
@@ -108,20 +119,23 @@ for job in "${JOBS[@]}"; do
   t0=$(date +%s)
   status "RUNNING since $(date '+%F %T'): $job"
   if [[ "$KIND" == real-sweep ]]; then
-    [[ -f "$DATA/tests/R/count/records.jsonl" ]] || { STATUS+=("real-sweep: skipped (real-photo pool not built; see the queue log)"); continue; }
-    step "real-photo counting test for every model that lacks it"
+    step "real-photo tests for every model that lacks them"
     rc=0; n=0
-    for spec in "Qwen/Qwen3.5-4B|default|Qwen3.5-4B" "Qwen/Qwen3.5-4B|point|Qwen3.5-4B+point" \
-                $(for m in runs/*/v*/checkpoint-*-merged/.complete; do [[ -f "$m" ]] || continue; d=$(dirname "$m");
-                    r=$(basename "$(dirname "$(dirname "$d")")"); echo "$d|default|$r-$(basename "$d" | sed 's/checkpoint-/ckpt/')"; done); do
-      IFS='|' read -r MODEL STYLE NAME <<< "$spec"
-      [[ -f "results/${NAME}_gen-R-count_nothink_summary.json" ]] && continue
-      wait_for_gpu 16 || { rc=1; continue; }
-      uv run run_vlms_are_biased.py --model "$MODEL" --records "$DATA/tests/R/count" --prompt-style "$STYLE" \
-        --max-new-tokens "${EVAL_MAX_TOKENS:-4096}" --output-dir results --gpu-memory-utilization "$(eval_gpu_util)" || rc=1
-      n=$(( n + 1 ))
+    for TEST in R/count P/count P/conflict; do
+      [[ -f "$DATA/tests/$TEST/records.jsonl" ]] || continue
+      TAG="gen-${TEST/\//-}"
+      for spec in "Qwen/Qwen3.5-4B|default|Qwen3.5-4B" "Qwen/Qwen3.5-4B|point-total|Qwen3.5-4B+pointT" \
+                  $(for m in runs/*/v*/checkpoint-*-merged/.complete; do [[ -f "$m" ]] || continue; d=$(dirname "$m");
+                      r=$(basename "$(dirname "$(dirname "$d")")"); echo "$d|default|$r-$(basename "$d" | sed 's/checkpoint-/ckpt/')"; done); do
+        IFS='|' read -r MODEL STYLE NAME <<< "$spec"
+        [[ -f "results/${NAME}_${TAG}_nothink_summary.json" ]] && continue
+        wait_for_gpu 16 || { rc=1; continue; }
+        uv run run_vlms_are_biased.py --model "$MODEL" --records "$DATA/tests/$TEST" --prompt-style "$STYLE" \
+          --max-new-tokens "${EVAL_MAX_TOKENS:-4096}" --output-dir results --gpu-memory-utilization "$(eval_gpu_util)" || rc=1
+        n=$(( n + 1 ))
+      done
     done
-    tag="real-sweep ($n models)"
+    tag="real-sweep ($n evals)"
   elif [[ "$KIND" == sweep ]]; then
     tag="sweep $A"
     [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
