@@ -50,6 +50,9 @@ def parse_args():
     p.add_argument("--edits", type=int, default=200, help="held-out add-leg edit pairs to score")
     p.add_argument("--lens", type=int, default=600, help="VLMBias counting items for the logit lens")
     p.add_argument("--gallery", type=int, default=12)
+    p.add_argument("--count-train", type=int, default=1200, help="non-VLMBias items for the answer-position count probe")
+    p.add_argument("--count-test", type=int, default=300)
+    p.add_argument("--pool-heads", type=int, default=12, help="attention-pool heads of the image-token count probe")
     p.add_argument("--layers", default="auto", help="comma list of layers to probe (auto: 0, L/4, L/2, 3L/4, L)")
     p.add_argument("--out", type=Path, default=None)
     return p.parse_args()
@@ -108,14 +111,22 @@ class Runner:
         return {l: out.hidden_states[l][0, pos].float().cpu().numpy() for l in layers}, side
 
     @torch.no_grad()
-    def lens(self, img, question):
-        """Digit distribution after a teacher-forced "{" at every layer: (n_layers + 1, 10)."""
+    @torch.no_grad()
+    def lens(self, img, question, keep_states=False, img_layers=()):
+        """Digit distribution after a teacher-forced "{" at every layer: (n_layers + 1, 10); with keep_states also
+        the answer-position hidden states (n_layers + 1, hidden) for the count probe."""
         enc = self.inputs(img, question, prefix="{")
         out = self.model(**enc, output_hidden_states=True)
         rows = []
         for h in out.hidden_states:
             logits = self.head(self.norm(h[:, -1]))[0].float()
             rows.append(torch.softmax(logits, -1)[self.digit_ids].cpu().numpy())
+        if keep_states:
+            ans = torch.stack([h[0, -1] for h in out.hidden_states]).float().cpu().numpy()
+            if img_layers:  # image-token states (independent of the question: the image precedes it in the prompt)
+                pos, _ = self.image_positions(enc)
+                return np.stack(rows), ans, {l: out.hidden_states[l][0, pos].half().cpu() for l in img_layers}
+            return np.stack(rows), ans
         return np.stack(rows)
 
     def saliency(self, img, question, good, bad):
@@ -158,6 +169,70 @@ def token_labels(masks, side, pos_frac=0.3):
     lab[frac >= pos_frac] = 1
     lab[frac == 0] = 0
     return lab.ravel(), frac
+
+
+class AttnPoolProbe(torch.nn.Module):
+    """Count from all image tokens of one layer: LayerNorm -> multi-head attention pooling with one learned query
+    per head and low-rank keys/values -> linear to 10 count classes. 12 heads (enough to attend to separate parts),
+    32-dim keys/values per head: ~2M parameters for ~1,200 training images, early-stopped on held-out items."""
+    def __init__(self, d, heads=12, dk=32, dv=32, n_cls=10):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(d)
+        self.k = torch.nn.Linear(d, heads * dk, bias=False)
+        self.v = torch.nn.Linear(d, heads * dv, bias=False)
+        self.q = torch.nn.Parameter(torch.randn(heads, dk) / dk ** 0.5)
+        self.out = torch.nn.Linear(heads * dv, n_cls)
+        self.h, self.dk, self.dv = heads, dk, dv
+
+    def forward(self, x):  # x: (batch, tokens, d)
+        x = self.norm(x)
+        b, t, _ = x.shape
+        k = self.k(x).view(b, t, self.h, self.dk)
+        v = self.v(x).view(b, t, self.h, self.dv)
+        att = torch.softmax(torch.einsum("bthd,hd->bth", k, self.q) / self.dk ** 0.5, dim=1)
+        return self.out(torch.einsum("bth,bthd->bhd", att, v).reshape(b, -1))
+
+
+def image_count_probe(Itr, ytr, Ite, yte, vimg, vstates, layers, dev, epochs=40, seed=0, heads=12):
+    """Per layer: train AttnPoolProbe on non-VLMBias items (labels = true count), early-stop on held-out items,
+    then read VLMBias: does it decode the true count or the familiar one from the image tokens alone?"""
+    out = {}
+    ytr_t, yte_t = torch.tensor(ytr), torch.tensor(yte) if yte is not None else None
+    for l in layers:
+        torch.manual_seed(seed)
+        Xtr = torch.stack([d[l] for d in Itr]).to(dev).float()
+        Xte = torch.stack([d[l] for d in Ite]).to(dev).float() if Ite else None
+        m = AttnPoolProbe(Xtr.shape[-1], heads=heads).to(dev)
+        opt = torch.optim.AdamW(m.parameters(), lr=1e-3, weight_decay=0.05)
+        best, best_state = -1.0, None
+        for ep in range(epochs):
+            m.train()
+            perm = torch.randperm(len(Xtr))
+            for i in range(0, len(Xtr), 32):
+                idx = perm[i:i + 32]
+                loss = torch.nn.functional.cross_entropy(m(Xtr[idx]), ytr_t[idx].to(dev))
+                opt.zero_grad(); loss.backward(); opt.step()
+            if Xte is not None:
+                m.eval()
+                with torch.no_grad():
+                    acc = (m(Xte).argmax(1).cpu() == yte_t).float().mean().item()
+                if acc > best:
+                    best, best_state = acc, {k: v.clone() for k, v in m.state_dict().items()}
+        if best_state:
+            m.load_state_dict(best_state)
+        m.eval()
+        row = {"heldout_acc": best}
+        for grp, items in vimg.items():
+            with torch.no_grad():
+                pred = m(torch.stack([d[l] for d in items]).to(dev).float()).argmax(1).cpu().numpy()
+            truth = [(t, f) for _, t, f in vstates[grp]]
+            row[grp] = {"reads_true": float(np.mean([p == t for p, (t, _) in zip(pred, truth)])),
+                        "reads_familiar": float(np.mean([p == f for p, (_, f) in zip(pred, truth)]))}
+        out[l] = row
+        print(f"image-token count probe layer {l:2d}: held-out {best:.2f} | " + " | ".join(
+            f"{g} reads true {row[g]['reads_true']:.2f} / familiar {row[g]['reads_familiar']:.2f}" for g in vimg))
+        del Xtr, Xte
+    return out
 
 
 def num(x):
@@ -262,19 +337,72 @@ def main():
     rng.shuffle(idx)
     animals = [i for i in idx if ds[i]["topic"] == "Animals"][: args.lens // 2]
     others = [i for i in idx if ds[i]["topic"] not in ("Animals", "Optical Illusion")][: args.lens // 2]
-    lens = {}
+    img_layers = sorted({0, L // 4, L // 2, 3 * L // 4, L})
+    lens, vstates, vimg = {}, {}, {}
     for grp, ids in (("animals", animals), ("other", others)):
-        pt, pb = [], []
+        pt, pb, st, im = [], [], [], []
         for i in tqdm(ids, desc=f"logit lens {grp}", unit="item"):
             ex = ds[i]
-            d = R.lens(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))
+            d, h, hi = R.lens(ex["image"], rewrite_prompt(ex["prompt"], DIRECT), keep_states=True, img_layers=img_layers)
             pt.append(d[:, num(ex["ground_truth"])]); pb.append(d[:, num(ex["expected_bias"])])
+            st.append((h, num(ex["ground_truth"]), num(ex["expected_bias"]))); im.append(hi)
+        vstates[grp], vimg[grp] = st, im
         if pt:
             logodds = np.mean(np.log(np.array(pt) + 1e-9) - np.log(np.array(pb) + 1e-9), 0)
             lens[grp] = {"p_true": np.mean(pt, 0).tolist(), "p_familiar": np.mean(pb, 0).tolist(), "n": len(pt),
                          "log_odds_true_vs_familiar": logodds.tolist(),
                          "final_true_wins": float(np.mean([a[-1] > b[-1] for a, b in zip(pt, pb)]))}
     res["logit_lens"] = lens
+
+    # ---- 3b. count probe: is the TRUE count linearly decodable at the answer position, layer by layer? -------
+    # The logit lens reads intermediate layers through the final LM head, which only fits the last layers (digit
+    # probabilities are ~0 before that), so it cannot say where the count is lost. Instead train a 10-way digit
+    # probe per layer on the answer-position state of NON-VLMBias counting items with known counts (Pascal-Part
+    # visible legs, synthetic validation pairs), check it on held-out items, then ask on VLMBias whether it reads
+    # out the true count or the familiar one.
+    def count_items(pool, n):
+        recs = [r for r in read_jsonl(data / pool / "records.jsonl") if r.get("prior") == "count" and r["answer"] < 10]
+        rng.shuffle(recs)
+        return recs[:n]
+    ctrain = count_items("parts/count", args.count_train // 2) + count_items("e1/val_conflict", args.count_train // 2)
+    ctest = count_items("tests/P/count", args.count_test // 2) + count_items("tests/T0/count", args.count_test // 2)
+    def states_of(recs, desc):
+        H, y, I = [], [], []
+        for r in tqdm(recs, desc=desc, unit="item"):
+            _, h, hi = R.lens(Image.open(data / r["image"]), rewrite_prompt(r["question"], DIRECT), keep_states=True,
+                              img_layers=img_layers)
+            H.append(h); y.append(r["answer"]); I.append(hi)
+        return np.stack(H), np.array(y), I
+    count_probe = {}
+    if ctrain:
+        Htr, ytr_c, Itr = states_of(ctrain, "count probe: train states")
+        Hte, yte_c, Ite = states_of(ctest, "count probe: held-out states") if ctest else (None, None, None)
+        layers_all = list(range(Htr.shape[1]))
+        for l in layers_all:
+            mu, sd = Htr[:, l].mean(0), Htr[:, l].std(0) + 1e-6
+            clf = LogisticRegression(max_iter=3000, C=0.05).fit((Htr[:, l] - mu) / sd, ytr_c)
+            cls = list(clf.classes_)
+            row = {"heldout_acc": float((clf.predict((Hte[:, l] - mu) / sd) == yte_c).mean()) if Hte is not None else None}
+            for grp, st in vstates.items():
+                X = (np.stack([h[l] for h, _, _ in st]) - mu) / sd
+                P = clf.predict_proba(X)
+                pred = clf.classes_[P.argmax(1)]
+                pt_ = np.array([P[k, cls.index(t)] if t in cls else 0.0 for k, (_, t, _) in enumerate(st)])
+                pf_ = np.array([P[k, cls.index(f)] if f in cls else 0.0 for k, (_, _, f) in enumerate(st)])
+                row[grp] = {"reads_true": float(np.mean([p == t for p, (_, t, _) in zip(pred, st)])),
+                            "reads_familiar": float(np.mean([p == f for p, (_, _, f) in zip(pred, st)])),
+                            "p_true": float(pt_.mean()), "p_familiar": float(pf_.mean())}
+            count_probe[l] = row
+        best = max(layers_all, key=lambda l: count_probe[l].get("animals", {}).get("reads_true", 0) - count_probe[l].get("animals", {}).get("reads_familiar", 0))
+        res["count_probe"] = count_probe
+        res["count_probe_best_layer_animals"] = best
+        res["image_count_probe"] = image_count_probe(Itr, ytr_c, Ite, yte_c, vimg, vstates, img_layers, R.dev, heads=args.pool_heads)
+        print("count probe (layer: held-out acc | animals reads true / familiar | other reads true / familiar):")
+        for l in layers_all[::4] + [layers_all[-1]]:
+            r_ = count_probe[l]
+            print(f"  {l:2d}: {r_['heldout_acc']:.2f} | {r_.get('animals', {}).get('reads_true', float('nan')):.2f} / "
+                  f"{r_.get('animals', {}).get('reads_familiar', float('nan')):.2f} | {r_.get('other', {}).get('reads_true', float('nan')):.2f} / "
+                  f"{r_.get('other', {}).get('reads_familiar', float('nan')):.2f}")
 
     # ---- 4. saliency gallery ------------------------------------------------------------------------------
     import matplotlib
@@ -309,15 +437,25 @@ def main():
     fig, ax = plt.subplots(1, 3, figsize=(15, 3.6))
     ax[0].plot(layers, [auc[l] for l in layers], marker="o"); ax[0].set_ylim(0.5, 1); ax[0].set_xlabel("layer")
     ax[0].set_title("leg-token probe AUC (held-out photos)")
-    for grp, st in lens.items():
-        ax[1].plot(st["p_true"], label=f"{grp}: true count"); ax[1].plot(st["p_familiar"], "--", label=f"{grp}: familiar count")
-    ax[1].set_xlabel("layer (logit lens)"); ax[1].set_ylabel("probability"); ax[1].legend(fontsize=8)
-    ax[1].set_title("VLMBias: true vs familiar answer by layer")
+    if count_probe:
+        ls = sorted(count_probe)
+        ax[1].plot(ls, [count_probe[l]["heldout_acc"] for l in ls], color="gray", label="held-out (non-VLMBias) accuracy")
+        for grp, c in (("animals", "C0"), ("other", "C1")):
+            if grp in count_probe[ls[0]]:
+                ax[1].plot(ls, [count_probe[l][grp]["reads_true"] for l in ls], color=c, label=f"VLMBias {grp}: reads true count")
+                ax[1].plot(ls, [count_probe[l][grp]["reads_familiar"] for l in ls], "--", color=c, label=f"VLMBias {grp}: reads familiar")
+        icp = res.get("image_count_probe") or {}
+        il = sorted(icp)
+        for grp, c in (("animals", "C0"), ("other", "C1")):
+            if il and grp in icp[il[0]]:
+                ax[1].plot(il, [icp[l][grp]["reads_true"] for l in il], ":", marker="s", color=c, label=f"image tokens, {grp}: reads true")
+        ax[1].set_ylim(0, 1); ax[1].set_xlabel("layer"); ax[1].legend(fontsize=6)
+        ax[1].set_title("count probe at the answer position")
     for grp, st in lens.items():
         ax[2].plot(st["log_odds_true_vs_familiar"], label=grp)
     ax[2].axhline(0, color="gray", lw=0.8); ax[2].set_xlabel("layer (logit lens)")
     ax[2].set_ylabel("mean log P(true) - log P(familiar)"); ax[2].legend(fontsize=8)
-    ax[2].set_title("> 0: layer prefers the true count")
+    ax[2].set_title("logit lens (final head; only meaningful late)")
     fig.tight_layout(); fig.savefig(out / "summary.png", dpi=130); plt.close(fig)
     (out / "probe.json").write_text(json.dumps(res, indent=1))
     html = ["<html><body style='font-family:sans-serif'>", f"<h2>Probe: {args.model}</h2>", "<img src='summary.png' width=900>",

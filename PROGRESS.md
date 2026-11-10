@@ -501,6 +501,48 @@ base undercounts by 9 to 1).
    condition), on the v2 pairs (counting rows only).
 4. Generative edits only if v2 still fails in-domain (the edits would then be the problem).
 
+### 3.2j Data v2 result (2026-11-10, seed 0)
+
+| model | VLMBias | animals | excl. animals | canonical | balanced | own held-out 5-leg edits | color cf |
+|---|---|---|---|---|---|---|---|
+| base | 12.7 | 0.0 | 17.4 | **96.9** | 54.8 | 0 | 95.2 |
+| base + point-then-total | 39.0 | 78.8 | 24.0 | 79.1 | 59.1 | 25 | 95.2 |
+| part-conflict-point (v1) | 38.8 | 63.2 | **29.5** | 78.5 | 58.6 | 37 | 37.5 |
+| part2-conflict-point (v2) | **43.9** | **90.5** | 26.3 | 78.5 | **61.2** | **59** | **96.9** |
+
+- v2 changes only the data (two add pairs per removal, foot points, color mixed in). It is the first trained
+  arm above the prompted base overall, from the animal topic: 88 fixed vs 24 broken (p = 1.5e-9).
+  Outside animals 26.3 vs 24.0, not significant (198 vs 165, p = 0.08). So the gain is in-category.
+- Color-question collapse fixed by mixing (96.9). Held-out synthetic canonicals drop to 74.1 (v1 88.9).
+- Our edits are harder than VLMBias's: the prompted base gets 25% on our five-leg edits vs 79% on VLMBias
+  animals (plain base: 0% vs 0%). The arms learn them (v2: 59%).
+- real-point scores 0% on the bird leg items: it points at three "legs" on 128 of 146 birds (true count
+  1-2), i.e. it overcounts bird legs, probably a quadruped-style or minimum-count habit from LVIS crowds
+  (which always have 3-15 instances).
+- Queued: probes, part2-conflict-count, seeds 1 and 2 of part2-conflict-point, prompt study, RL from base.
+
+### 3.2k Probe of the base model (2026-11-10): the model sees the legs, late layers override
+
+`tools/probe_vision.py` on Qwen3.5-4B (reports/probe/Qwen3.5-4B/):
+- **Leg probe:** logistic probe on image-token states, trained on Pascal-Part leg masks (800 crops), AUC on
+  held-out photos 0.96 at layer 0 (vision output as the LM receives it), 0.95 / 0.94 / 0.93 / 0.93 at layers
+  8 / 16 / 24 / 32. Leg information survives through the whole language model.
+- **Pasted legs:** on the 96 held-out five-leg edits (all answered wrong by the base with the plain prompt),
+  the pasted leg scores 0.86 (real legs 0.92, background 0.09) at layer 0, and similarly at later layers.
+- **Logit lens** (forced direct answer, 300 VLMBias animal + 300 other counting items; final LM head applied to
+  each layer's answer-position state): digits get almost no probability before layer ~28, so the logit lens
+  cannot locate where the count is lost. An earlier reading ("layers 4-13 prefer the true count, the familiar
+  count takes over from ~16") compared near-zero probabilities and is withdrawn.
+- **Reading:** perception is intact (legs, pasted ones included, are decodable from the image tokens), yet the
+  answer is the familiar count. Where the count is lost between the image tokens and the answer is open.
+- **Next (built 2026-11-10):** (a) count probes per layer, trained on non-VLMBias counting items (Pascal-Part
+  visible legs + synthetic validation pairs) and read on VLMBias: a linear probe at the answer position, and a
+  12-head attention pool over the image tokens (low-rank keys/values, 32 dims per head, ~2M parameters,
+  early-stopped on held-out items); (b) `tools/steer_count.py`: a "true count vs familiar answer" direction at
+  the answer position from non-VLMBias counterfactuals, added at layers 12/16/20/24, evaluated on VLMBias
+  (animals vs excl. animals) and the originals; (c) LoRA restricted to layers 16-31 (`LORA_LAYERS=16-31`),
+  `part2-conflict-point ... late`.
+
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
 - **Fixed-prior families reproduce the VLMBias pattern.**

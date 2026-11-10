@@ -18,7 +18,15 @@ cd "$(dirname "$0")/.."
 
 if [[ "$MODEL" == *"2.5"* ]]; then TAG=qwen2.5-vl; THINK=(); else TAG=qwen3.5; THINK=(--add_non_thinking_prefix true); fi
 EXP="$DATA/exports/$ARM/$TAG/$FMT"
-RUN="runs/${ARM}-${FMT}-${TAG}-s${SEED}"
+# LORA_LAYERS=16-31: LoRA only on those language-model layers (all their linear projections), e.g. to target the
+# late layers where the familiar count takes over; run name gets -L16-31. Default: all linear layers.
+LAYER_TAG=""; TARGET=(--target_modules all-linear)
+if [[ -n "${LORA_LAYERS:-}" ]]; then
+  LO=${LORA_LAYERS%-*}; HI=${LORA_LAYERS#*-}; LAYER_TAG="-L${LO}-${HI}"
+  ALT=$(seq "$LO" "$HI" | paste -sd'|' -)
+  TARGET=(--target_regex ".*language_model\.layers\.(${ALT})\.(self_attn\.(q|k|v|o)_proj|linear_attn\.(in_proj_qkv|in_proj_z|in_proj_a|in_proj_b|out_proj)|mlp\.(gate|up|down)_proj)")
+fi
+RUN="runs/${ARM}-${FMT}-${TAG}-s${SEED}${LAYER_TAG}"
 BATCH=${BATCH:-auto}
 source tools/common.sh
 # Effective batch is fixed at 32 (design doc; 256 updates/epoch on 8,192 examples). Only the micro-batch
@@ -90,7 +98,7 @@ if ! merged_done; then
     mkdir -p "$RUN"
     RAW_START=0; [[ -f "$RUN/train_raw.log" ]] && RAW_START=$(wc -l < "$RUN/train_raw.log")
     if USE_HF=1 "${SWIFT[@]}" sft \
-      --model "$MODEL" --tuner_type lora --target_modules all-linear \
+      --model "$MODEL" --tuner_type lora "${TARGET[@]}" \
       --lora_rank 16 --lora_alpha 32 --lora_dropout 0.05 \
       --dataset "$EXP/train.jsonl" "${VAL[@]}" ${THINK[@]+"${THINK[@]}"} \
       --torch_dtype bfloat16 --num_train_epochs 2 --learning_rate 1e-4 \

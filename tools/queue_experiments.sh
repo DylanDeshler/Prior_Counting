@@ -16,6 +16,8 @@
 #   prompt <model> <style>           prompt study: VLMBias main + original only; styles cot, debias, cot-debias,
 #                                    point-debias (answer_parsing.PROMPT_SUFFIXES), or think (thinking mode)
 #   rl <start>                       GRPO (tools/train_rl.sh): "base" = base + point-then-total prompt, or a run name
+#   steer <model>                    activation steering along a "true count vs familiar" direction (tools/steer_count.py)
+#   train <arm> <format> <seed> late LoRA on language-model layers 16-31 only (run name gets -L16-31)
 #   probe <model>                    interpretability (tools/probe_vision.py): leg probe on image tokens, added-leg
 #                                    scores, logit lens, saliency; <model> is "base" or a run name
 #   sweep <run>                      overfitting check: accuracy at 25/50/75/100% of training on held-out real
@@ -61,6 +63,11 @@ JOBS=(
   "prompt base                                  point-debias"
   "prompt base                                  think"
   "prompt part-conflict-point-points-qwen3.5-s0 debias"
+  "probe base"
+  "steer base"
+  "train part2-conflict-point points 0 late"
+  "probe part2-conflict-point-points-qwen3.5-s0-L16-31"
+  "steer part2-conflict-point-points-qwen3.5-s0"
   "rl    base"
   "train real-mixed      mixed  0"
   "eval  real-mixed-mixed-qwen3.5-s0            direct"
@@ -98,6 +105,8 @@ JOBS=(
   "train neutral-point   points 2"
   "train neutral-mixed   mixed  2"
   "train neutral-count   number 2"
+  "train part2-conflict-point points 1"
+  "train part2-conflict-point points 2"
 )
 
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found: run this on the GPU box"; exit 1; }
@@ -140,7 +149,7 @@ status() {  # progress at a glance, including the job that is running right now
   { printf '%s\n' "${STATUS[@]}"; [[ -n "${1:-}" ]] && echo "$1"; } > "$DATA/reports/queue_status.txt"
 }
 for job in "${JOBS[@]}"; do
-  read -r KIND A B C <<< "$job"
+  read -r KIND A B C D <<< "$job"
   t0=$(date +%s)
   status "RUNNING since $(date '+%F %T'): $job"
   if [[ "$KIND" == real-sweep ]]; then
@@ -206,10 +215,22 @@ for job in "${JOBS[@]}"; do
       [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
       NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
     fi
-    [[ -f "$DATA/reports/probe/$NAME/probe.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    grep -q image_count_probe "$DATA/reports/probe/$NAME/probe.json" 2>/dev/null && { STATUS+=("$tag: already done"); continue; }
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
     uv run tools/probe_vision.py --data "$DATA" --model "$MODEL"; rc=$?
+  elif [[ "$KIND" == steer ]]; then
+    tag="steer $A"
+    if [[ "$A" == base ]]; then MODEL=$BASE NAME=Qwen3.5-4B
+    else
+      MODEL=$(merged_of "$A")
+      [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+      NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
+    fi
+    [[ -f "$DATA/reports/steer/$NAME/steer.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    step "$tag"
+    wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
+    uv run tools/steer_count.py --data "$DATA" --model "$MODEL"; rc=$?
   elif [[ "$KIND" == sweep ]]; then
     tag="sweep $A"
     [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
@@ -217,13 +238,14 @@ for job in "${JOBS[@]}"; do
     tools/ckpt_sweep.sh "$DATA" "$A"; rc=$?
   elif [[ "$KIND" == train ]]; then
     ARM=$A FMT=$B SEED=$C RUN="${A}-${B}-qwen3.5-s${C}" tag="train $A/$B/s$C"
+    LAYERS=""; [[ "${D:-}" == late ]] && { LAYERS=16-31; RUN="$RUN-L16-31"; tag="$tag (LoRA layers 16-31)"; }
     [[ -f "$DATA/exports/$ARM/qwen3.5/$FMT/train.jsonl" ]] || { STATUS+=("$tag: skipped (no export)"); continue; }
     m=$(merged_of "$RUN")
     if [[ -n "$m" ]] && (( $(summaries "$RUN-$(basename "$m" | sed 's/checkpoint-/ckpt/')") >= 4 )); then
       STATUS+=("$tag: already done"); continue
     fi
     step "$tag"
-    if wait_for_gpu "${TRAIN_GPU_GIB:-24}"; then tools/train_arm.sh "$DATA" "$ARM" "$FMT" "$SEED"; rc=$?
+    if wait_for_gpu "${TRAIN_GPU_GIB:-24}"; then LORA_LAYERS=$LAYERS tools/train_arm.sh "$DATA" "$ARM" "$FMT" "$SEED"; rc=$?
     else rc=1; fi
   else
     STYLE=$B tag="eval $A +$B"
