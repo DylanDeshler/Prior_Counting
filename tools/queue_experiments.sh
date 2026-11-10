@@ -13,6 +13,9 @@
 #                                    (e.g. conflict-point-points-qwen3.5-s0); styles: point, point-total, direct
 #   real-sweep                       real-photo tests (tests/R/count, tests/P/count, tests/P/conflict) for the base
 #                                    model (plain and point-then-total prompts) and every trained arm lacking them
+#   prompt <model> <style>           prompt study: VLMBias main + original only; styles cot, debias, cot-debias,
+#                                    point-debias (answer_parsing.PROMPT_SUFFIXES), or think (thinking mode)
+#   rl <start_run>                   GRPO on top of a trained arm (tools/train_rl.sh), then the core suite
 #   sweep <run>                      overfitting check: accuracy at 25/50/75/100% of training on held-out real
 #                                    photos (real/val) and held-out synthetic families (tools/ckpt_sweep.sh)
 # The real-photo counting pool is built first, on its own (it needs a lot of RAM; running it next to a
@@ -44,6 +47,13 @@ JOBS=(
   "train part-neutral-point  points 0"
   "train part-conflict-count number 0"
   "real-sweep"
+  "prompt base                                  cot"
+  "prompt base                                  debias"
+  "prompt base                                  cot-debias"
+  "prompt base                                  point-debias"
+  "prompt base                                  think"
+  "prompt part-conflict-point-points-qwen3.5-s0 debias"
+  "rl    part-conflict-point-points-qwen3.5-s0"
   "train real-mixed      mixed  0"
   "eval  real-mixed-mixed-qwen3.5-s0            direct"
   "sweep real-mixed-mixed-qwen3.5-s0"
@@ -100,7 +110,9 @@ fi
 # Re-export when an export layout changed (fast; train files of existing arms stay byte-identical):
 # the held-out real-photo validation set (real/val, the validation loss of every arm) and real-only arms.
 if [[ ! -f "$DATA/real/val/records.jsonl" || ! -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" \
-      || ( -f "$DATA/parts/count/records.jsonl" && ! -f "$DATA/exports/part-neutral-point/qwen3.5/points/train.jsonl" ) ]]; then
+      || ( -f "$DATA/parts/count/records.jsonl" && ! -f "$DATA/exports/part-neutral-point/qwen3.5/points/train.jsonl" ) \
+      || ( -f "$DATA/exports/part-conflict-point/qwen3.5/points/train_rl.jsonl" \
+           && ! $(head -c 4000 "$DATA/exports/part-conflict-point/qwen3.5/points/train_rl.jsonl" | grep -c unit_size) -gt 0 ) ]]; then
   step "export training data"
   uv run python -m datagen --data "$DATA" export || echo "WARNING: export failed"
 fi
@@ -136,6 +148,39 @@ for job in "${JOBS[@]}"; do
       done
     done
     tag="real-sweep ($n evals)"
+  elif [[ "$KIND" == prompt ]]; then
+    STYLE=$B tag="prompt $A +$B"
+    if [[ "$A" == base ]]; then MODEL=$BASE NAME="Qwen3.5-4B"
+    else
+      MODEL=$(merged_of "$A")
+      [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+      NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
+    fi
+    if [[ "$STYLE" == think ]]; then ARGS=(--thinking --max-new-tokens "${EVAL_MAX_TOKENS_THINK:-8192}"); SUFFIX=think; T=""
+    else
+      T=$(python3 -c "import sys; sys.path.insert(0, '.'); from answer_parsing import STYLE_TAG; print(STYLE_TAG['$STYLE'])") \
+        || { STATUS+=("$tag: unknown style"); continue; }
+      ARGS=(--prompt-style "$STYLE" --max-new-tokens "${EVAL_MAX_TOKENS:-4096}"); SUFFIX=nothink
+    fi
+    if [[ -f "results/${NAME}${T}_main_${SUFFIX}_summary.json" && -f "results/${NAME}${T}_original_${SUFFIX}_summary.json" ]]; then
+      STATUS+=("$tag: already done"); continue
+    fi
+    step "$tag"
+    rc=0
+    for SPLIT in main original; do
+      wait_for_gpu 16 || { rc=1; break; }
+      uv run run_vlms_are_biased.py --model "$MODEL" --split "$SPLIT" "${ARGS[@]}" --output-dir results \
+        --gpu-memory-utilization "$(eval_gpu_util)" || rc=1
+    done
+  elif [[ "$KIND" == rl ]]; then
+    tag="rl $A"
+    [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+    m=$(merged_of "$A-grpo")
+    if [[ -n "$m" ]] && (( $(summaries "$A-grpo-$(basename "$m" | sed 's/checkpoint-/ckpt/')") >= 4 )); then
+      STATUS+=("$tag: already done"); continue
+    fi
+    step "$tag"
+    tools/train_rl.sh "$DATA" "$A"; rc=$?
   elif [[ "$KIND" == sweep ]]; then
     tag="sweep $A"
     [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }

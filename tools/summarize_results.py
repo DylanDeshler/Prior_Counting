@@ -34,9 +34,9 @@ def main(results="results"):
     rows = defaultdict(dict)
     for f in sorted(Path(results).glob("*_summary.json")):
         m = re.match(r"(.+?)_(main|original|gen-.+?)_(think|nothink)_summary$", f.stem)
-        if not m or m.group(3) != "nothink":
+        if not m:
             continue
-        model, tag = m.group(1), m.group(2)
+        model, tag = m.group(1) + ("+think" if m.group(3) == "think" else ""), m.group(2)
         s = json.loads(f.read_text())
         r = rows[model]
         if tag == "main":

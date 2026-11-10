@@ -385,6 +385,43 @@ VLMBias animals and VLMBias excluding animals separately, so in-category gains a
 `part-conflict-count`. Queued right after the real-point sweep; `real-sweep` now also evaluates the base
 (plain and point-then-total) and every arm on `tests/P/count` and `tests/P/conflict`.
 
+### 3.2g First part-counting arm and the real-point sweep (2026-11-10)
+
+**part-conflict-point s0** (real leg edit pairs, ~1,800 images, 112 steps; plain prompts):
+
+| model | VLMBias | excl. animals | animals | canonical |
+|---|---|---|---|---|
+| base, default | 12.7 | 17.4 | 0.0 | 96.9 |
+| base, point-then-total prompt | **39.0** | 24.0 | **78.8** | 79.1 |
+| C-point s0 | 28.4 | 23.9 | 40.5 | 72.4 |
+| real-point s0 | 30.4 | 22.5 | 51.1 | 71.8 |
+| part-conflict-point s0 | 38.8 | **29.5** | 63.2 | 78.5 |
+
+- Best trained arm; level with prompting overall, with no pointing instruction at eval time.
+- **Transfer outside animals** (the arm trains on animal legs, so this is the clean number): vs the prompted
+  base on 1,446 non-animal items it fixes 233 and breaks 153 (sign test p = 5e-5). Gains on logos, grids,
+  flags.
+- Animals: 63 vs 79 for the prompted base (fixes 70, breaks 155). Unexplained so far.
+- Canonical 78.5: best of the point-trained arms; the guardrail still fails (base 96.9).
+- One seed. Held-out leg tests (tests/P) still running at download time.
+
+**Queued next (2026-11-10):**
+- *Prompt study* (VLMBias main + original, base model; `prompt` jobs): `cot` (think step by step),
+  `debias` ("count each and every one of the {part}… the image may have been edited… ignore what you
+  expect"), `cot-debias` (step-by-step enumeration of each {part} + edit check + "intentionally ignore my
+  bias"), `point-debias` (point-then-total + de-bias), and thinking mode. {part} is parsed from the question
+  (`answer_parsing.counted_part`: legs, stars, stripes, chess pieces, …). Also part-conflict-point + debias.
+- *RL* (`tools/train_rl.sh`, GRPO in ms-swift, LoRA on top of merged part-conflict-point): prompts = the part
+  pools' train_rl rows; rewards (`tools/rl_rewards.py`) = correct total (1.0) + point F1 against the
+  ground-truth leg points within max(25, 0.6 x unit size) on the 0-1000 grid (1.0) + list length equals
+  the stated total (0.2). Never rewards distance from the familiar answer. 200 steps x 8 prompts x 8
+  completions, lr 1e-5, KL beta 0.04, HF generation by default (`RL_VLLM=1` for colocated vLLM rollouts).
+  Untested on the GPU: the first run is also the smoke test.
+
+**real-point overfitting sweep:** real/val accuracy 69.0 / 68.0 / 71.0 / 70.3 at steps 100 / 200 / 350 / 442
+(point F1 0.85 → 0.87); T0 counterfactual 59 / 65 / 63 / 62. Flat after ~25% of training: no overfitting
+on held-out real photos, and no gain from training longer.
+
 ### 3.2b Base model on a small preview of the generated data (Oct 6, n ≈ 8 per cell, before later fixes)
 
 - **Fixed-prior families reproduce the VLMBias pattern.**

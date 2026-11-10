@@ -110,6 +110,9 @@ def rows_for(records, fmt, model, point_fmt, blind=False):
                   "familiar_answer": r["familiar_answer"], "prior": r["prior"], "label": r.get("label")}
         if r["prior"] == "count":
             rl_row["points"] = [model_point(model, x, y, point_fmt) for x, y in r["points"]]
+            # unit size in the same coordinates as the points: the RL point reward's match radius scales with it
+            scale = 1000 / IMG if (model == "qwen3.5" and point_fmt == "rel1000") else 1.0
+            rl_row["unit_size"] = round((r.get("unit_size_px") or 0) * scale, 1)
         rl.append(rl_row)
     return sft, rl
 
