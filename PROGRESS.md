@@ -123,6 +123,74 @@ Qwen2.5-VL points use pixels.
 
 ## 3. Results so far
 
+Read §3.0 first: results grouped by hypothesis, with strategies and datasets in separate sections and
+descriptive names. §3.1 onward is the chronological log (run ids, details, corrections) it summarizes.
+
+### 3.0 Results by hypothesis (updated 2026-11-10)
+
+**How the question evolved.** Each result set the next step:
+1. *Does the model have a count prior?* Yes: 12.7% on edited VLMBias images vs 96.9% on the originals.
+2. *Pointing at each object breaks it (prompt).* Partly: 39%, at -18 on originals. This became the bar to beat.
+3. *Instructions alone are enough* (step by step, "ignore what you expect", thinking mode). No: animals stay at 0-1%.
+4. *Synthetic conflict pairs transfer.* Solved in synthetic data, not on VLMBias, so we tried real photos.
+5. *Real-photo object counts transfer.* +21 on real photos, not on VLMBias. VLMBias counts parts of one
+   object, so we tried animal legs.
+6. *Real animal-leg edits transfer.* v1 tied prompting and was worse on animals; diagnosed a bad data mix.
+7. *Fixed leg data (v2).* Beats prompting on animals (90.5 vs 78.8); no gain on other topics.
+8. *The model can't see the edited part.* Rejected: every leg is decodable from the image tokens. Where the
+   count is lost is open.
+9. *Training only the late layers (16-31) fixes the decision.* Rejected: worse than all-layer training on
+   every measure.
+10. *The model never forms the true count.* Rejected for animals: the image tokens hold it (94%), it reaches the
+    answer position by layer ~16, and the last layers overwrite it with the familiar count.
+11. *One steering direction fixes it.* No effect at the strengths tried (weak push); stronger rerun queued. RL
+    from the pointing prompt is running.
+
+Baseline for every comparison: the untrained model with the pointing prompt. "Other topics" = VLMBias
+without the animal topic (the leg data trains on animals, so this is the transfer measure).
+
+**Strategies** (how we ask or train; data held fixed)
+- *Prompting, untrained model:* plain 12.7 (animals 0, other 17.4, originals 96.9); step by step 14.3;
+  de-bias text 19.5 (animals 1.3, other 26.3, originals 87.1); thinking mode 12.8; pointing 39.0 (animals
+  78.8, other 24.0, originals 79.1); pointing + de-bias 40.2 (other 27.2, originals 81.6, balanced 60.9).
+  Only pointing unlocks counting.
+- *Output format, same data:* number targets keep originals higher (86-92 vs 72-79) and learn the trained
+  category as well (animals: synthetic 13 vs 40, legs v1 68 vs 63, legs v2 96.5 vs 90.5); point-list targets
+  add +10-14 on other topics with leg data (29.5 vs 15.8, 26.3 vs 16.4), never beyond the de-bias prompt (26.3).
+- *Which layers are trained, same data (leg edits v2, point lists):* all layers vs layers 16-31 only: own
+  five-leg edits 59 vs 30, animals 90.5 vs 82.6, other topics 26.3 vs 20.7 (below the pointing prompt),
+  originals 78.5 vs 62.0 (late-only vs all: animals 27 fixed / 70 broken, other 125 / 205, both p < 1e-4).
+
+**Datasets** (trained with point lists unless noted)
+- *Synthetic conflict pairs:* held-out synthetic families 89% (prompt 61), VLMBias 28.4 (animals 40.5, other
+  23.9), originals 72.4. The gray-image control gains nothing in accuracy.
+- *Real-photo objects (LVIS):* held-out real photos 68.5 (prompt 47.1), VLMBias 30.4, originals 71.8.
+- *Natural animal legs:* animals 9.0 (learns "visible legs", undercounts), other 26.1.
+- *Animal-leg edits v1:* animals 63.2 (worse than the prompt), other 29.5; own five-leg edits 37%.
+- *Animal-leg edits v2* (two add pairs per removal, foot points, color mixed in): animals 90.5, other 26.3
+  (n.s. vs the prompt), originals 78.5; own five-leg edits 59%.
+
+**Diagnosis:**
+- Legs are linearly decodable from image tokens (AUC 0.96 at the vision output, 0.93 at the last layer), pasted
+  legs included (0.86 vs real 0.92).
+- Count probes (trained on leg edits incl. 3- and 5-legged animals + synthetic pairs, never VLMBias; read on 300
+  VLMBias animal items): a 12-head attention pool over the image tokens reads the TRUE count on 94% at the vision
+  output (familiar 3%), 73-83% at later layers. A linear probe at the answer position reads the true count in the
+  middle layers (85% at layer 16) and the familiar count at the end (layer 32: true 20%, familiar 76%); the model
+  answers 0% correctly. The leg-trained model keeps the true count longer (94-96% at layers 20-28) before it also
+  drops. Caveats: held-out probe accuracy 0.52-0.71; held-out five-leg edits n = 20 (image probe reads 5 on ~55%);
+  no clear count signal for other topics (animals-only finding). Tension: LoRA on layers 16-31 alone did worse.
+- Steering, round 1: a true-vs-familiar direction (226 vs 452 answers on synthetic + leg counterfactuals) added
+  at layer 12/16/20/24 at 0.05-0.2x the state norm, answer position only: no effect (animals 0%, other 10-12%,
+  originals 90-93%). Round 2 queued: up to 1x norm at every text position after the image
+  (reports/steer/<model>/text-a1_3_6_10/).
+
+**Combined (best of each):** pointing + de-bias prompt (balanced 60.9), leg edits v2 with point lists (best
+overall 43.9, balanced 61.2), leg edits v2 with numbers (best balanced 62.4, animals 96.5, originals 86.5,
+other 16.4), leg edits v1 with point lists + de-bias prompt at test (40.5, other 28.8, originals 79.8,
+balanced 60.1). None lifts the other topics beyond ~27-29, which the de-bias text alone reaches.
+
+
 ### 3.1 Baseline: Qwen3.5-4B on the core suite (2026-11-04, greedy, thinking off)
 
 | Set | n | Canonical acc | Counterfactual acc | Bias rate |

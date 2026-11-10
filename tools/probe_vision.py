@@ -171,6 +171,36 @@ def token_labels(masks, side, pos_frac=0.3):
     return lab.ravel(), frac
 
 
+class TorchLogReg:
+    """Multinomial logistic regression on the GPU (full-batch L-BFGS, L2), sklearn-like predict/predict_proba."""
+    def __init__(self, dev, l2=1e-2, iters=100):
+        self.dev, self.l2, self.iters = dev, l2, iters
+
+    def fit(self, X, y):
+        self.classes_ = np.unique(y)
+        idx = {c: i for i, c in enumerate(self.classes_)}
+        Xt = torch.tensor(X, dtype=torch.float32, device=self.dev)
+        yt = torch.tensor([idx[v] for v in y], device=self.dev)
+        self.W = torch.zeros(Xt.shape[1], len(self.classes_), device=self.dev, requires_grad=True)
+        self.b = torch.zeros(len(self.classes_), device=self.dev, requires_grad=True)
+        opt = torch.optim.LBFGS([self.W, self.b], max_iter=self.iters, line_search_fn="strong_wolfe")
+        def closure():
+            opt.zero_grad()
+            loss = torch.nn.functional.cross_entropy(Xt @ self.W + self.b, yt) + self.l2 * (self.W ** 2).sum()
+            loss.backward()
+            return loss
+        with torch.enable_grad():
+            opt.step(closure)
+        return self
+
+    def predict_proba(self, X):
+        with torch.no_grad():
+            return torch.softmax(torch.tensor(X, dtype=torch.float32, device=self.dev) @ self.W + self.b, -1).cpu().numpy()
+
+    def predict(self, X):
+        return self.classes_[self.predict_proba(X).argmax(1)]
+
+
 class AttnPoolProbe(torch.nn.Module):
     """Count from all image tokens of one layer: LayerNorm -> multi-head attention pooling with one learned query
     per head and low-rank keys/values -> linear to 10 count classes. 12 heads (enough to attend to separate parts),
@@ -389,9 +419,9 @@ def main():
         Htr, ytr_c, Itr = states_of(ctrain, "count probe: train states")
         Hte, yte_c, Ite = states_of(ctest, "count probe: held-out states") if ctest else (None, None, None)
         layers_all = list(range(Htr.shape[1]))
-        for l in layers_all:
+        for l in tqdm(layers_all, desc="answer-position count probe (GPU)", unit="layer"):
             mu, sd = Htr[:, l].mean(0), Htr[:, l].std(0) + 1e-6
-            clf = LogisticRegression(max_iter=3000, C=0.05).fit((Htr[:, l] - mu) / sd, ytr_c)
+            clf = TorchLogReg(R.dev).fit((Htr[:, l] - mu) / sd, ytr_c)  # was sklearn lbfgs: ~1-2 min per layer on CPU
             cls = list(clf.classes_)
             row = {"heldout_acc": float((clf.predict((Hte[:, l] - mu) / sd) == yte_c).mean()) if Hte is not None else None}
             if Hte is not None and five_leg:  # held-out five-leg edits: does the probe read 5 where the model says 4?

@@ -65,11 +65,11 @@ JOBS=(
   "prompt part-conflict-point-points-qwen3.5-s0 debias"
   "probe base"
   "probe part2-conflict-point-points-qwen3.5-s0"
-  "steer base"
   "train part2-conflict-point points 0 late"
   "probe part2-conflict-point-points-qwen3.5-s0-L16-31"
-  "steer part2-conflict-point-points-qwen3.5-s0"
   "rl    base"
+  "steer base"
+  "steer part2-conflict-point-points-qwen3.5-s0"
   "train real-mixed      mixed  0"
   "eval  real-mixed-mixed-qwen3.5-s0            direct"
   "sweep real-mixed-mixed-qwen3.5-s0"
@@ -228,7 +228,7 @@ for job in "${JOBS[@]}"; do
       [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
       NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
     fi
-    [[ -f "$DATA/reports/steer/$NAME/steer.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    [[ -f "$DATA/reports/steer/$NAME/text-a1_3_6_10/steer.json" ]] && { STATUS+=("$tag: already done"); continue; }
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
     uv run tools/steer_count.py --data "$DATA" --model "$MODEL"; rc=$?

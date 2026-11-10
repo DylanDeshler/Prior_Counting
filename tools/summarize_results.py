@@ -26,6 +26,33 @@ from collections import defaultdict
 from pathlib import Path
 
 
+# Descriptive names for shared tables (run ids stay in parentheses for cross-reference).
+DATASETS = [("part2-conflict", "animal-leg edits v2"), ("part-conflict", "animal-leg edits v1"), ("part-neutral", "natural animal legs"),
+            ("real-", "real-photo objects (LVIS)"), ("conflict-blind", "synthetic pairs, images grayed (control)"),
+            ("conflict-", "synthetic conflict pairs"), ("neutral-", "synthetic neutral images"), ("dice-only", "synthetic dice only")]
+FORMATS = {"number": "numbers", "points": "point lists", "mixed": "half point lists, half numbers", "list": "item lists", "count": "numbers",
+           "point": "point lists"}
+PROMPTS = {"+pointT": "pointing prompt", "+point": "pointing prompt (old wording)", "+direct": "direct-answer prompt", "+cot": "step-by-step prompt",
+           "+debias": "de-bias prompt", "+cotDebias": "step-by-step + de-bias prompt", "+pointDebias": "pointing + de-bias prompt", "+think": "thinking mode"}
+
+
+def display(model):
+    """'part2-conflict-point-points-qwen3.5-s0-ckpt222-merged+debias' -> 'Trained on animal-leg edits v2, point lists; de-bias prompt (run id)'."""
+    base, prompt = model, ""
+    for tag in sorted(PROMPTS, key=len, reverse=True):
+        if model.endswith(tag):
+            base, prompt = model[: -len(tag)], PROMPTS[tag]
+            break
+    if base.startswith("Qwen3.5-4B"):
+        label = "No training, " + (prompt or "plain prompt")
+    else:
+        data = next((v for k, v in DATASETS if base.startswith(k)), base.split("-qwen")[0])
+        fmt = next((v for k, v in FORMATS.items() if f"-{k}-qwen" in base), "")
+        extra = " (LoRA on layers 16-31 only)" if "-L16-31" in base else ""
+        label = f"Trained on {data}" + (f", {fmt}" if fmt else "") + extra + (f"; {prompt}" if prompt else "")
+    return f"{label} ({model})"
+
+
 def pct(x):
     return "-" if x is None else f"{100 * x:.1f}"
 
@@ -85,14 +112,14 @@ def main(results="results"):
         bal = (r["vlm_acc"] + r["orig"]) / 2 if "vlm_acc" in r and "orig" in r else None
         cells = [r.get("vlm_acc"), r.get("vlm_bias"), r.get("orig"), bal, r.get("t0_can"), r.get("t0_cf"),
                  r.get("t0_bias"), r.get("t2_can"), r.get("t2_cf"), r.get("t2_bias"), r.get("val_c"), r.get("val_s"), r.get("real_acc")]
-        lines.append("| " + " | ".join([model] + [pct(c) for c in cells]) + " |")
+        lines.append("| " + " | ".join([display(model)] + [pct(c) for c in cells]) + " |")
     if any("pt_rate" in r for r in rows.values()):  # pointing readouts (pointing prompt or point-trained arms)
         ph = ["model", "pointing rate", "VLMBias list-length acc", "list bias", "stated-total acc", "T0 point F1",
               "Real list acc", "Real point F1"]
         lines += ["", "Pointing readouts (counting items):", "", "| " + " | ".join(ph) + " |", "|" + "---|" * len(ph)]
         for model, r in sorted(rows.items()):
             if "pt_rate" in r:
-                lines.append("| " + " | ".join([model] + [pct(r.get(k)) for k in
+                lines.append("| " + " | ".join([display(model)] + [pct(r.get(k)) for k in
                                                            ("pt_rate", "vlm_list", "vlm_list_bias", "vlm_acc", "t0_f1",
                                                             "real_list", "real_f1")]) + " |")
     if any("part_acc" in r or "part_cf" in r for r in rows.values()):  # real-photo part counting (Pascal-Part legs)
@@ -102,7 +129,7 @@ def main(results="results"):
                   "for transfer):", "", "| " + " | ".join(qh) + " |", "|" + "---|" * len(qh)]
         for model, r in sorted(rows.items(), key=lambda kv: (kv[0] != "Qwen3.5-4B", kv[0])):
             if any(k in r for k in ("part_acc", "part_cf")):
-                lines.append("| " + " | ".join([model] + [pct(r.get(k)) for k in
+                lines.append("| " + " | ".join([display(model)] + [pct(r.get(k)) for k in
                                                            ("vlm_animal", "vlm_noanimal", "part_acc", "part_f1",
                                                             "part_can", "part_cf", "part_bias")]) + " |")
     table = "\n".join(lines)

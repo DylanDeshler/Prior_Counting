@@ -40,7 +40,10 @@ def parse_args():
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--model", default="Qwen/Qwen3.5-4B")
     p.add_argument("--layers", default="auto", help="comma list (auto: 3L/8, L/2, 5L/8, 3L/4)")
-    p.add_argument("--alphas", default="0.5,1,2", help="steering strengths, in units of the mean state norm x 0.1")
+    p.add_argument("--alphas", default="1,3,6,10", help="steering strengths, in units of the mean state norm x 0.1 "
+                   "(first run used 0.5-2, i.e. at most 0.2 x norm, and had no effect)")
+    p.add_argument("--positions", choices=["last", "text"], default="text",
+                   help="add the vector at the answer position only, or at every text position after the image")
     p.add_argument("--direction-items", type=int, default=800)
     p.add_argument("--max-items", type=int, default=1000, help="VLMBias main items evaluated per configuration")
     p.add_argument("--out", type=Path, default=None)
@@ -48,16 +51,20 @@ def parse_args():
 
 
 class Steer:
-    """Forward hook adding a vector to the last position of one decoder layer's output."""
+    """Forward hook adding a vector to one decoder layer's output: at the last position, or at every position from
+    `start` on (the text after the image)."""
     def __init__(self, layer_module):
-        self.vec = None
+        self.vec, self.start = None, None
         self.h = layer_module.register_forward_hook(self.hook)
 
     def hook(self, module, inputs, output):
         if self.vec is None:
             return output
         hs = output[0] if isinstance(output, tuple) else output
-        hs[:, -1, :] += self.vec.to(hs.dtype)
+        if self.start is None:
+            hs[:, -1, :] += self.vec.to(hs.dtype)
+        else:
+            hs[:, self.start:, :] += self.vec.to(hs.dtype)
         return output
 
     def remove(self):
@@ -70,7 +77,7 @@ def main():
     mp = Path(args.model.rstrip("/"))
     name = (f"{mp.parent.parent.name}-{mp.name.replace('checkpoint-', 'ckpt')}" if mp.exists() and mp.name.startswith("checkpoint")
             else args.model.split("/")[-1])
-    out = args.out or data / "reports" / "steer" / name
+    out = args.out or data / "reports" / "steer" / name / f"{args.positions}-a{args.alphas.replace(',', '_')}"
     out.mkdir(parents=True, exist_ok=True)
     R = Runner(args.model)
     L = R.n_layers
@@ -101,7 +108,7 @@ def main():
         if good[l] and bad[l]:
             d = np.mean(good[l], 0) - np.mean(bad[l], 0)
             dirs[l] = (torch.tensor(d / np.linalg.norm(d)), float(np.mean(norms[l])))
-    res = {"model": args.model, "layers": layers, "alphas": alphas,
+    res = {"model": args.model, "layers": layers, "alphas": alphas, "positions": args.positions,
            "direction_n": {"true": len(good[layers[0]]), "familiar": len(bad[layers[0]])}}
     print(f"direction from {res['direction_n']['true']} true-count vs {res['direction_n']['familiar']} familiar-count answers")
 
@@ -118,16 +125,24 @@ def main():
     main_ids = items(main_ds, True)[: args.max_items]
     orig_ids = items(orig_ds, False)
     lm = R.model.model.language_model if hasattr(R.model.model, "language_model") else R.model.model
+    hook_ref = {}
+    def answer_probs(img, q):
+        h = hook_ref.get("h")
+        if h is not None and args.positions == "text":
+            enc = R.inputs(img, q, prefix="{")
+            pos, _ = R.image_positions(enc)
+            h.start = int(pos[-1]) + 1
+        return R.lens(img, q)[-1]
     def evaluate(tag):
         rows = {"animals": [0, 0, 0], "other": [0, 0, 0], "canonical": [0, 0]}
         for i in tqdm(main_ids, desc=f"VLMBias {tag}", unit="item", leave=False):
             ex = main_ds[i]
-            pred = int(np.argmax(R.lens(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))[-1]))
+            pred = int(np.argmax(answer_probs(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))))
             g = rows["animals" if ex["topic"] == "Animals" else "other"]
             g[0] += 1; g[1] += pred == num(ex["ground_truth"]); g[2] += pred == num(ex["expected_bias"])
         for i in tqdm(orig_ids, desc=f"original {tag}", unit="item", leave=False):
             ex = orig_ds[i]
-            pred = int(np.argmax(R.lens(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))[-1]))
+            pred = int(np.argmax(answer_probs(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))))
             rows["canonical"][0] += 1; rows["canonical"][1] += pred == num(ex["ground_truth"])
         f = lambda a, b: round(100 * a / b, 1) if b else None
         return {"animals_acc": f(rows["animals"][1], rows["animals"][0]), "animals_familiar": f(rows["animals"][2], rows["animals"][0]),
@@ -137,14 +152,14 @@ def main():
     results = {"baseline": evaluate("baseline")}
     print("baseline:", results["baseline"])
     for l, (d, norm) in dirs.items():
-        hook = Steer(lm.layers[l])
+        hook = Steer(lm.layers[l]); hook_ref["h"] = hook
         try:
             for a in alphas:
                 hook.vec = (a * 0.1 * norm * d).to(R.dev)
                 results[f"L{l}_a{a}"] = evaluate(f"layer {l}, alpha {a}")
                 print(f"layer {l} alpha {a}:", results[f"L{l}_a{a}"])
         finally:
-            hook.remove()
+            hook.remove(); hook_ref.pop("h", None)
     res["results"] = results
     (out / "steer.json").write_text(json.dumps(res, indent=1))
 
