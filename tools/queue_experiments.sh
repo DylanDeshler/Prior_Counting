@@ -228,7 +228,7 @@ for job in "${JOBS[@]}"; do
       [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
       NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
     fi
-    [[ -f "$DATA/reports/steer/$NAME/text-a1_3_6_10/steer.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    [[ -f "$DATA/reports/steer/$NAME/text-a-10_1_3_10_30_100/steer.json" ]] && { STATUS+=("$tag: already done"); continue; }
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
     uv run tools/steer_count.py --data "$DATA" --model "$MODEL"; rc=$?

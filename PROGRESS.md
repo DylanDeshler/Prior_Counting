@@ -143,8 +143,8 @@ descriptive names. §3.1 onward is the chronological log (run ids, details, corr
    every measure.
 10. *The model never forms the true count.* Rejected for animals: the image tokens hold it (94%), it reaches the
     answer position by layer ~16, and the last layers overwrite it with the familiar count.
-11. *One steering direction fixes it.* No effect at the strengths tried (weak push); stronger rerun queued. RL
-    from the pointing prompt is running.
+11. *One steering direction fixes it.* No effect at <= 0.2x the state norm; a 0.1x-10x sweep (plus reversed) is
+    queued after RL from the pointing prompt.
 
 Baseline for every comparison: the untrained model with the pointing prompt. "Other topics" = VLMBias
 without the animal topic (the leg data trains on animals, so this is the transfer measure).
@@ -182,8 +182,9 @@ without the animal topic (the leg data trains on animals, so this is the transfe
   no clear count signal for other topics (animals-only finding). Tension: LoRA on layers 16-31 alone did worse.
 - Steering, round 1: a true-vs-familiar direction (226 vs 452 answers on synthetic + leg counterfactuals) added
   at layer 12/16/20/24 at 0.05-0.2x the state norm, answer position only: no effect (animals 0%, other 10-12%,
-  originals 90-93%). Round 2 queued: up to 1x norm at every text position after the image
-  (reports/steer/<model>/text-a1_3_6_10/).
+  originals 90-93%). Round 2 queued: 0.1x to 10x the state norm plus -1x (reversed, sanity check), at every
+  text position after the image, recording the probability left on digit tokens as a validity check
+  (reports/steer/<model>/text-a-10_1_3_10_30_100/).
 
 **Combined (best of each):** pointing + de-bias prompt (balanced 60.9), leg edits v2 with point lists (best
 overall 43.9, balanced 61.2), leg edits v2 with numbers (best balanced 62.4, animals 96.5, originals 86.5,

@@ -40,8 +40,9 @@ def parse_args():
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--model", default="Qwen/Qwen3.5-4B")
     p.add_argument("--layers", default="auto", help="comma list (auto: 3L/8, L/2, 5L/8, 3L/4)")
-    p.add_argument("--alphas", default="1,3,6,10", help="steering strengths, in units of the mean state norm x 0.1 "
-                   "(first run used 0.5-2, i.e. at most 0.2 x norm, and had no effect)")
+    p.add_argument("--alphas", default="-10,1,3,10,30,100", help="steering strengths in units of 0.1 x the mean state norm: "
+                   "the default spans 0.1x to 10x the norm, plus -1x (the opposite direction, a sanity check that should "
+                   "push toward the familiar answer). Round 1 used at most 0.2x and had no effect")
     p.add_argument("--positions", choices=["last", "text"], default="text",
                    help="add the vector at the answer position only, or at every text position after the image")
     p.add_argument("--direction-items", type=int, default=800)
@@ -135,9 +136,11 @@ def main():
         return R.lens(img, q)[-1]
     def evaluate(tag):
         rows = {"animals": [0, 0, 0], "other": [0, 0, 0], "canonical": [0, 0]}
+        mass = []  # probability on digit tokens after "{": near 1 = still answering; low = the model is broken
         for i in tqdm(main_ids, desc=f"VLMBias {tag}", unit="item", leave=False):
             ex = main_ds[i]
-            pred = int(np.argmax(answer_probs(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))))
+            pr = answer_probs(ex["image"], rewrite_prompt(ex["prompt"], DIRECT))
+            pred = int(np.argmax(pr)); mass.append(float(pr.sum()))
             g = rows["animals" if ex["topic"] == "Animals" else "other"]
             g[0] += 1; g[1] += pred == num(ex["ground_truth"]); g[2] += pred == num(ex["expected_bias"])
         for i in tqdm(orig_ids, desc=f"original {tag}", unit="item", leave=False):
@@ -148,6 +151,7 @@ def main():
         return {"animals_acc": f(rows["animals"][1], rows["animals"][0]), "animals_familiar": f(rows["animals"][2], rows["animals"][0]),
                 "other_acc": f(rows["other"][1], rows["other"][0]), "other_familiar": f(rows["other"][2], rows["other"][0]),
                 "canonical_acc": f(rows["canonical"][1], rows["canonical"][0]),
+                "digit_mass": round(float(np.mean(mass)), 3) if mass else None,
                 "n": {"animals": rows["animals"][0], "other": rows["other"][0], "canonical": rows["canonical"][0]}}
     results = {"baseline": evaluate("baseline")}
     print("baseline:", results["baseline"])
@@ -166,13 +170,15 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, axs = plt.subplots(1, 3, figsize=(14, 3.8), sharey=True)
-    for ax, key, title in zip(axs, ("animals_acc", "other_acc", "canonical_acc"),
-                              ("VLMBias animals", "VLMBias excl. animals (transfer)", "VLMBias originals (canonical)")):
+    fig, axs = plt.subplots(1, 4, figsize=(18, 3.8))
+    xs = [a * 0.1 for a in alphas]  # strength as a multiple of the mean state norm
+    for ax, key, title in zip(axs, ("animals_acc", "other_acc", "canonical_acc", "digit_mass"),
+                              ("VLMBias animals", "VLMBias other topics (transfer)", "VLMBias originals (canonical)",
+                               "probability on digits (validity)")):
         ax.axhline(results["baseline"][key], color="gray", lw=1, label="no steering")
         for l in dirs:
-            ax.plot(alphas, [results[f"L{l}_a{a}"][key] for a in alphas], marker="o", label=f"layer {l}")
-        ax.set_title(title); ax.set_xlabel("steering strength (x 0.1 mean norm)")
+            ax.plot(xs, [results[f"L{l}_a{a}"][key] for a in alphas], marker="o", label=f"layer {l}")
+        ax.set_xscale("symlog", linthresh=0.1); ax.set_title(title); ax.set_xlabel("strength (x mean state norm; negative = reversed)")
     axs[0].set_ylabel("direct-answer accuracy (%)"); axs[0].legend(fontsize=8)
     fig.tight_layout(); fig.savefig(out / "steer.png", dpi=130); plt.close(fig)
     print(f"wrote {out}/steer.json")
