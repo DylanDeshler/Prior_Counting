@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# GRPO (RL) on top of a trained SFT arm, with verifiable rewards: correct total, points on the real units,
-# list length = stated total (tools/rl_rewards.py). Then merge and run the core eval suite.
+# GRPO (RL) on top of a trained SFT arm, with verifiable rewards (tools/rl_rewards.py): correct total (weight 1.0,
+# the objective), points on the real units (0.2) and list length = stated total (0.1) as small shaping terms. Equal
+# count/point weights (first run, 2026-11-24) raised point F1 3x faster than count accuracy. Then merge and eval.
 #
 #   tools/train_rl.sh <data_dir> <start> [rl_arm ...]
 #   tools/train_rl.sh /data/vlm base                                   # base model + point-then-total prompt (default plan)
@@ -96,14 +97,14 @@ if ! ls "$RUN"/v*/checkpoint-*-merged/.complete >/dev/null 2>&1; then
       --model "$MODEL" --tuner_type lora --target_modules all-linear --lora_rank 16 --lora_alpha 32 --lora_dropout 0.05 \
       --dataset "${DATASETS[@]}" --add_non_thinking_prefix true \
       --external_plugins tools/rl_rewards.py --reward_funcs count_acc point_f1 points_consistent \
-      --reward_weights 1.0 1.0 0.2 \
+      --reward_weights 1.0 0.2 0.1 \
       --num_generations "$GEN" --temperature 1.0 --max_completion_length "${RL_MAX_TOKENS:-768}" \
       --per_device_train_batch_size "$GEN" --gradient_accumulation_steps "$PROMPTS" \
       --learning_rate "${RL_LR:-1e-5}" --beta "${RL_BETA:-0.04}" --max_steps "$STEPS" --warmup_ratio 0.03 \
       --torch_dtype bfloat16 --gradient_checkpointing true --seed 0 \
       --save_strategy steps --save_steps 25 --save_total_limit 20 --logging_steps 5 --log_completions true \
       --dataloader_num_workers 4 --dataset_num_proc 4 --output_dir "$RUN" \
-      "${VLLM[@]}" ${RESUME[@]+"${RESUME[@]}"} 2>&1 | tee -a "$RUN/train_raw.log" | grep --line-buffered -E "reward|Train|loss|Error|error" || true
+      "${VLLM[@]}" ${RESUME[@]+"${RESUME[@]}"} 2>&1 | tee -a "$RUN/train_raw.log" || true  # unfiltered, like train_arm.sh: a grep here hid the progress bar
     read -r CKPT STEP MAX <<< "$(ckpt_state)"
   fi
   (( MAX > 0 && STEP >= MAX )) || { echo "GRPO did not finish: latest checkpoint at step $STEP of $MAX (see $RUN/train_raw.log)"; exit 1; }

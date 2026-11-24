@@ -175,7 +175,10 @@ descriptive names. §3.1 onward is the chronological log (run ids, details, corr
     true count barely appears (<= 26%) and originals fall 91 -> 25-54%; >= 3x the model stops answering with a number.
     Steering the leg-trained model makes it worse in both directions.
 17. *RL from the pointing prompt*: failed at startup (ms-swift GRPO needs `msgspec`, not in the SFT install);
-    `tools/train_rl.sh` now installs it. Reruns when the queue is restarted.
+    `tools/train_rl.sh` now installs it. Rerun with weights count 1.0 / point F1 1.0 / consistency 0.2: over
+    steps 1-30 point F1 rose 0.36 -> 0.51 but count accuracy only 0.41 -> 0.47 (sampled, T=1; noise ~0.05),
+    KL 0.006. Equal weights let the model earn reward by placing points better on legs it already sees.
+    Restarted with 1.0 / 0.2 / 0.1 (2026-11-24); ~40 s/step, 200 steps ~2.2 h.
 18. *Queued next (2026-11-24), all aimed at the diagnosed mechanism or at the "only its own category" problem:*
     - `tools/interventions.py` (inference only, untrained model, forced direct answers): (1) answer from a mid-layer
       count probe at the answer position (class-balanced over counts 0-9 from leg edits, natural legs, synthetic
@@ -529,8 +532,8 @@ VLMBias animals and VLMBias excluding animals separately, so in-category gains a
   (`answer_parsing.counted_part`: legs, stars, stripes, chess pieces, …). Also part-conflict-point + debias.
 - *RL* (`tools/train_rl.sh`, GRPO in ms-swift, LoRA on top of merged part-conflict-point): prompts = the part
   pools' train_rl rows; rewards (`tools/rl_rewards.py`) = correct total (1.0) + point F1 against the
-  ground-truth leg points within max(25, 0.6 x unit size) on the 0-1000 grid (1.0) + list length equals
-  the stated total (0.2). Never rewards distance from the familiar answer. 200 steps x 8 prompts x 8
+  ground-truth leg points within max(25, 0.6 x unit size) on the 0-1000 grid (0.2) + list length equals
+  the stated total (0.1); the count is the objective, the other two are small shaping terms. Never rewards distance from the familiar answer. 200 steps x 8 prompts x 8
   completions, lr 1e-5, KL beta 0.04, HF generation by default (`RL_VLLM=1` for colocated vLLM rollouts).
   Untested on the GPU: the first run is also the smoke test.
 
