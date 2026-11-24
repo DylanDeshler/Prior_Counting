@@ -534,7 +534,7 @@ VLMBias animals and VLMBias excluding animals separately, so in-category gains a
   pools' train_rl rows; rewards (`tools/rl_rewards.py`) = correct total (1.0) + point F1 against the
   ground-truth leg points within max(25, 0.6 x unit size) on the 0-1000 grid (0.2) + list length equals
   the stated total (0.1); the count is the objective, the other two are small shaping terms. Never rewards distance from the familiar answer. 200 steps x 8 prompts x 8
-  completions, lr 1e-5, KL beta 0.04, HF generation by default (`RL_VLLM=1` for colocated vLLM rollouts).
+  completions, lr 1e-5, KL beta 0.04, colocated vLLM rollouts from a separate env (.venv-swift-rl; the SFT env is untouched), falling back to HF generate (~40 s/step for 64 completions) if vLLM is unusable or dies.
   Untested on the GPU: the first run is also the smoke test.
 
 **real-point overfitting sweep:** real/val accuracy 69.0 / 68.0 / 71.0 / 70.3 at steps 100 / 200 / 350 / 442

@@ -13,8 +13,11 @@
 # are the RL prompts (counting rows only; default part2-conflict-point). Output: runs/<start>-grpo (base:
 # runs/base-pointT-grpo); results <run>-ckpt<N>-merged (+pointT for base).
 # Env: RL_STEPS (200), RL_GENERATIONS (8 completions per prompt), RL_PROMPTS (8 prompts per step),
-#      RL_LR (1e-5), RL_BETA (0.04, KL to the start policy), RL_MAX_TOKENS (768), RL_VLLM (0: HF generate;
-#      1: colocated vLLM rollouts, faster but needs vllm in the ms-swift env), SKIP_EVAL=1.
+#      RL_LR (1e-5), RL_BETA (0.04, KL to the start policy), RL_MAX_TOKENS (768), SKIP_EVAL=1,
+#      RL_HF_GENERATE=1 (skip vLLM; roll out with HF generate, ~40 s/step for 64 completions).
+# Rollouts use colocated vLLM from a separate env (RL_ENV, default .venv-swift-rl: the SFT env's requirements plus
+# vllm), so the SFT env train_arm.sh uses is never modified. If that env can't be built, fails its check, or the
+# vLLM run dies, training falls back to HF generate (resuming from the latest checkpoint).
 # Resumable like train_arm.sh: checkpoints every 25 steps; rerun to continue.
 set -euo pipefail
 DATA=${1:?data dir}; START=${2:?start run, e.g. part-conflict-point-points-qwen3.5-s0}; shift 2
@@ -32,6 +35,32 @@ for pkg in msgspec; do
 done
 export PYTHONNOUSERSITE=1 TRITON_DEFAULT_FP_FUSION=1
 SWIFT=("$SWIFT_ENV/bin/swift")
+HF_GEN=(--use_vllm false)
+# Context cap for vLLM's KV cache: Qwen3.5's 262k default would not fit next to training (448 px image = 196 tokens).
+VLLM_GEN=(--use_vllm true --vllm_mode colocate --vllm_gpu_memory_utilization 0.35 --sleep_level 1
+          --vllm_max_model_len 4096 --vllm_limit_mm_per_prompt '{"image": 1}')
+MODES=(hf)
+if [[ "${RL_HF_GENERATE:-0}" != 1 ]]; then
+  RL_ENV=${RL_ENV:-.venv-swift-rl}
+  RL_REQS="$(cat "$SWIFT_ENV/.reqs") vllm>=0.30 msgspec"
+  if [[ ! -x "$RL_ENV/bin/swift" || "$(cat "$RL_ENV/.reqs" 2>/dev/null)" != "$RL_REQS" ]]; then
+    echo "setting up $RL_ENV for vLLM rollouts (first run only)"
+    rm -rf "$RL_ENV"
+    # shellcheck disable=SC2086  # RL_REQS is a space-separated requirement list
+    { uv venv "$RL_ENV" --python 3.12 --managed-python \
+        && uv pip install --python "$RL_ENV/bin/python" --torch-backend auto $RL_REQS \
+        && echo "$RL_REQS" > "$RL_ENV/.reqs"; } || echo "WARNING: could not build $RL_ENV"
+  fi
+  if [[ -f "$RL_ENV/.reqs" ]] && "$RL_ENV/bin/python" - <<'PY'
+import torch, transformers, vllm, swift, msgspec
+from packaging.version import Version
+assert Version(transformers.__version__) >= Version("5.9"), f"transformers {transformers.__version__} < 5.9"
+assert torch.cuda.is_available(), "no CUDA"
+print(f"vLLM rollouts: vllm {vllm.__version__}, transformers {transformers.__version__}, torch {torch.__version__}")
+PY
+  then MODES=(vllm hf)
+  else echo "WARNING: vLLM env not usable; rolling out with HF generate"; fi
+fi
 
 if [[ "$START" == base ]]; then MODEL=Qwen/Qwen3.5-4B
 else
@@ -65,8 +94,6 @@ PY
   DATASETS+=("$RUN/rl_data/$a.jsonl")
 done
 STEPS=${RL_STEPS:-200}; GEN=${RL_GENERATIONS:-8}; PROMPTS=${RL_PROMPTS:-8}
-VLLM=(--use_vllm false)
-[[ "${RL_VLLM:-0}" == 1 ]] && VLLM=(--use_vllm true --vllm_mode colocate --vllm_gpu_memory_utilization 0.35 --sleep_level 1)
 echo "GRPO from $MODEL on ${ARMS[*]}: $STEPS steps x $PROMPTS prompts x $GEN completions"
 
 ckpt_state() {  # "<path> <step> <max>" of the latest complete checkpoint, or "none 0 0"
@@ -89,7 +116,11 @@ PY
 if ! ls "$RUN"/v*/checkpoint-*-merged/.complete >/dev/null 2>&1; then
   read -r CKPT STEP MAX <<< "$(ckpt_state)"
   if [[ "$CKPT" == none ]] || (( STEP < MAX )); then
+    for MODE in "${MODES[@]}"; do
     RESUME=(); [[ "$CKPT" != none ]] && { echo "resuming from $CKPT (step $STEP of $MAX)"; RESUME=(--resume_from_checkpoint "$CKPT"); }
+    if [[ "$MODE" == vllm ]]; then SWIFT=("$RL_ENV/bin/swift"); ROLLOUT=("${VLLM_GEN[@]}")
+    else SWIFT=("$SWIFT_ENV/bin/swift"); ROLLOUT=("${HF_GEN[@]}"); fi
+    echo "rollouts: $MODE"
     wait_for_gpu "${TRAIN_GPU_GIB:-30}"
     mkdir -p "$RUN"
     # Completions per step = per_device_train_batch_size x gradient_accumulation_steps = PROMPTS x GEN.
@@ -104,8 +135,11 @@ if ! ls "$RUN"/v*/checkpoint-*-merged/.complete >/dev/null 2>&1; then
       --torch_dtype bfloat16 --gradient_checkpointing true --seed 0 \
       --save_strategy steps --save_steps 25 --save_total_limit 20 --logging_steps 5 --log_completions true \
       --dataloader_num_workers 4 --dataset_num_proc 4 --output_dir "$RUN" \
-      "${VLLM[@]}" ${RESUME[@]+"${RESUME[@]}"} 2>&1 | tee -a "$RUN/train_raw.log" || true  # unfiltered, like train_arm.sh: a grep here hid the progress bar
+      "${ROLLOUT[@]}" ${RESUME[@]+"${RESUME[@]}"} 2>&1 | tee -a "$RUN/train_raw.log" || true  # unfiltered, like train_arm.sh: a grep here hid the progress bar
     read -r CKPT STEP MAX <<< "$(ckpt_state)"
+    (( MAX > 0 && STEP >= MAX )) && break
+    echo "WARNING: GRPO with $MODE rollouts stopped at step $STEP of $MAX; trying the next rollout mode"
+    done
   fi
   (( MAX > 0 && STEP >= MAX )) || { echo "GRPO did not finish: latest checkpoint at step $STEP of $MAX (see $RUN/train_raw.log)"; exit 1; }
   rm -rf "${CKPT}-merged"
