@@ -44,6 +44,13 @@ NON_LEG_TASKS = [("bicycle", "wheel"), ("motorbike", "wheel"), ("car", "wheel"),
                  ("cat", "ear"), ("dog", "ear"), ("horse", "ear"), ("cow", "ear"), ("sheep", "ear"), ("cow", "horn")]
 NON_ANIMAL_CLASSES = ("bicycle", "motorbike", "car", "person")
 MAX_PER_TASK = 400  # candidates per (class, part) so arms and ears don't swamp wheels
+MARGIN_V3 = 1.6     # wider crops for non-leg parts: room on the background for the null edit of a large part (a wheel)
+# Add-edit rules per part (legs: v1/v2 rules). attach "top" = the copy's top touches the body (legs hang from it);
+# "near" = the copy lies within ~a quarter part-size of the object. max_body = how much of the copy may cover the body
+# (ears, wings and horns sit on the body).
+UNIT_EDIT = {"leg": {"attach": "top", "max_body": 0.40}, "wheel": {"attach": "near", "max_body": 0.50},
+             "wing": {"attach": "near", "max_body": 0.85}, "arm": {"attach": "near", "max_body": 0.60},
+             "ear": {"attach": "near", "max_body": 0.90}, "horn": {"attach": "near", "max_body": 0.90}}
 MARGIN = 1.15             # crop side = 1.15 x the animal's longer bbox side
 MIN_LEG_PX = 150          # every visible leg >= 150 px of mask at 448 px (count pool; unit size >= 12 px rule)
 MIN_EDIT_LEG_PX = 250     # legs used in edit pairs: larger, so the edit is clearly visible
@@ -150,10 +157,14 @@ def apply_edit(img, legs, e):
     raise ValueError(op)
 
 
-def plan_add(legs, obj_mask, crop, rng, others_mask, wide=False):
+def plan_add(legs, obj_mask, crop, rng, others_mask, wide=False, unit="leg", skip=0):
     """A leg and a horizontal offset where the copy sits inside the crop, clear of the other legs, mostly
     below the body (not pasted over the torso/head). wide (v2): more offsets, small vertical jitter and a
-    looser body-overlap limit, so fewer add edits are infeasible."""
+    looser body-overlap limit, so fewer add edits are infeasible. skip (v3): return the (skip+1)-th feasible
+    placement that differs from the earlier ones in copied part or side, or None (the second add job on an object
+    would otherwise often repeat the first image)."""
+    used = set()
+    rule = UNIT_EDIT.get(unit, UNIT_EDIT["leg"])
     body = obj_mask & ~np.logical_or.reduce(legs)
     near = dilate(np.logical_or.reduce(legs), 3)
     factors = [0.8, -0.8, 1.1, -1.1, 1.4, -1.4] + ([0.6, -0.6, 1.7, -1.7, 2.0, -2.0] if wide else [])
@@ -168,15 +179,22 @@ def plan_add(legs, obj_mask, crop, rng, others_mask, wide=False):
                 if kept < 0.999 or in_crop_frac(new, crop) < 0.999:
                     continue
                 area = new.sum()
-                if (new & near).sum() > 0.02 * area or (new & body).sum() > (0.40 if wide else 0.30) * area \
+                max_body = rule["max_body"] if unit != "leg" else (0.40 if wide else 0.30)
+                if (new & near).sum() > 0.02 * area or (new & body).sum() > max_body * area \
                         or (new & others_mask).sum() > 0.02 * area:
                     continue
-                # attached: the top of the copied leg must touch the body, or it reads as a separate object
-                nys = np.nonzero(new)[0]
-                top = new.copy(); top[nys.min() + max(2, int(0.15 * (nys.max() - nys.min() + 1))):] = False
-                if not (dilate(top, 4) & body).any():
+                if rule["attach"] == "top":  # legs: the top of the copy must touch the body, or it reads as a separate object
+                    nys = np.nonzero(new)[0]
+                    top = new.copy(); top[nys.min() + max(2, int(0.15 * (nys.max() - nys.min() + 1))):] = False
+                    if not (dilate(top, 4) & body).any():
+                        continue
+                elif (dilate(new, 4) & obj_mask & ~m).sum() < 0.03 * area:  # "near": touches the object (a floating
+                    continue                                                 # part would look like the null edit)
+                if (int(leg), dx > 0) in used:
                     continue
-                return {"op": "add", "leg": int(leg), "dx": dx, "dy": dy}
+                if len(used) == skip:
+                    return {"op": "add", "leg": int(leg), "dx": dx, "dy": dy}
+                used.add((int(leg), dx > 0))
     return None
 
 
@@ -255,7 +273,7 @@ def candidate(objs, k, o, unit, iid, w, h):
     legs = list(o["units"].get(unit, {}).values())
     if not legs:
         return None
-    crop = square_crop(o["bbox"], w, h)
+    crop = square_crop(o["bbox"], w, h, margin=MARGIN if unit == "leg" else MARGIN_V3)
     scale = IMG / crop[2]
     if o["mask"].sum() * scale ** 2 < MIN_OBJ_FRAC * IMG * IMG or min(in_crop_frac(m, crop) for m in legs) < 0.98:
         return None
@@ -366,7 +384,10 @@ def pair_job(args):
             others |= p["mask"]
     kinds = opts.get("kinds") or (("add", "remove") if idx % 2 == 0 else ("remove", "add"))
     for kind in kinds:
-        edit = plan_add(legs, o["mask"], c["crop"], rng, others, wide=opts.get("wide", False)) if kind == "add" \
+        # v3 ("skip" set): both add jobs on an object search placements in the same per-object order, so skip=1 differs
+        add_rng = rng_for(item_seed("add", c["image_id"], c["obj"], c.get("unit"))) if "skip" in opts else rng
+        edit = plan_add(legs, o["mask"], c["crop"], add_rng, others, wide=opts.get("wide", False), unit=c.get("unit", "leg"),
+                         skip=opts.get("skip", 0)) if kind == "add" \
             else plan_remove(legs, rng)
         null = plan_null(kind, legs, o["mask"] | others, c["crop"], rng, edit) if edit else None
         if edit and null:
@@ -444,7 +465,8 @@ def build_v3(limit=None):
     report = {"candidates_by_task": dict(Counter(f"{c['class']}:{c['unit']}" for c in cands))}
     for split, (out, dataset) in V3_POOLS.items():
         pool = [c for c in cands if c["split"] == split]
-        jobs = [(c, dataset, out, i, {"kinds": (V2_SCHEDULE[i % 3],), "wide": True})
+        pool.sort(key=lambda c: item_seed("v3", c["image_id"], c["obj"], c["unit"]))  # mixed tasks, so `limit` samples all
+        jobs = [(c, dataset, out, i, {"kinds": (V2_SCHEDULE[i % 3],), "wide": True, "skip": int(i % 3 == 1)})
                 for i, c in enumerate(c for c in pool for _ in V2_SCHEDULE)][:limit]
         recs, dropped = run(pair_job, jobs, dataset)
         write_jsonl(DATA / out / "records.jsonl", recs)
@@ -454,6 +476,7 @@ def build_v3(limit=None):
                            "edits": dict(Counter(r["edit"]["op"] for r in recs))}
         print(f"{out}: {len(recs)} images; by task {report[dataset]['by_task']}; dropped {dict(dropped)}")
     report["seconds"] = round(time.time() - t, 1)
+    REPORTS.mkdir(parents=True, exist_ok=True)
     (REPORTS / "build_parts_v3.json").write_text(json.dumps(report, indent=1, default=dict))
     return report
 
@@ -479,6 +502,7 @@ def build_v2(limit=None):
     report = {"animals": len(cands), "jobs": len(jobs), "records": len(recs), "dropped": dict(dropped),
               "answers": dict(sorted(Counter(r["answer"] for r in recs).items())),
               "edits": dict(Counter(r["edit"]["op"] for r in recs)), "seconds": round(time.time() - t, 1)}
+    REPORTS.mkdir(parents=True, exist_ok=True)
     (REPORTS / "build_parts_v2.json").write_text(json.dumps(report, indent=1, default=dict))
     print(f"{out}: {len(recs)} images from {len(jobs)} jobs; answers {report['answers']}; dropped {dict(dropped)}")
     return report

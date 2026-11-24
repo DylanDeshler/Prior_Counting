@@ -39,6 +39,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -150,18 +151,21 @@ def correct(it, pred):
     return (str(pred).lower() == str(it.truth).lower()) if it.kind == "color" else (pred == it.truth)
 
 
-def score(eng, sets):
+def score(eng, sets, desc="score"):
     """{set: {acc, familiar_rate, mass, n}} for the current hooks."""
     res = {}
+    bar = tqdm(total=sum(len(v) for v in sets.values()), desc=desc, unit="item")
     for name, items in sets.items():
         ok, fam, mass = [], [], []
         for it in items:
+            bar.update()
             a = eng.answer(it)
             ok.append(correct(it, a["pred"])); mass.append(a["mass"])
             if it.familiar is not None and it.kind == "count":
                 fam.append(a["pred"] == it.familiar)
         res[name] = {"acc": 100 * float(np.mean(ok)) if ok else None, "familiar": 100 * float(np.mean(fam)) if fam else None,
                      "digit_mass": float(np.mean(mass)) if mass else None, "n": len(items)}
+    bar.close()
     return res
 
 
@@ -170,7 +174,8 @@ class Leace:
     P = projection onto the column space of W Sigma_xz."""
     def __init__(self, X, Z, dev):
         # on the GPU in float64: the CPU version (numpy eigh + 2560^3 products) took many minutes per layer on a 4-core box
-        X = torch.as_tensor(X, dtype=torch.float64, device=dev); Z = torch.as_tensor(Z, dtype=torch.float64, device=dev)
+        fdev = dev if str(dev).startswith("cuda") else "cpu"  # MPS has no float64
+        X = torch.as_tensor(X, dtype=torch.float64, device=fdev); Z = torch.as_tensor(Z, dtype=torch.float64, device=fdev)
         mu = X.mean(0); Xc = X - mu; Zc = Z - Z.mean(0)
         S = Xc.T @ Xc / len(X)
         ev, V = torch.linalg.eigh(S)
@@ -180,8 +185,8 @@ class Leace:
         U, s_, _ = torch.linalg.svd(A, full_matrices=False)
         U = U[:, s_ > float(s_.max()) * 1e-6]
         M = Winv @ (U @ U.T) @ W
-        self.mu = mu.float()
-        self.M = M.float()
+        self.mu = mu.float().to(dev)
+        self.M = M.float().to(dev)
         self.rank = U.shape[1]
 
     def __call__(self, x):
@@ -224,7 +229,7 @@ def main():
     sets["ctrl_color"] = [it for it in local_items(data, "tests/T2/color", rng, args.controls * 2) if str(it.truth).lower() in COLORS][: args.controls]
     res["eval_sizes"] = {k: len(v) for k, v in sets.items()}
     print("eval sets:", res["eval_sizes"])
-    res["baseline"] = score(eng, sets)
+    res["baseline"] = score(eng, sets, "baseline: score")
     print("baseline:", {k: v["acc"] for k, v in res["baseline"].items()})
 
     # ---- 1. READOUT ------------------------------------------------------------------------------------------------
@@ -409,7 +414,7 @@ def main():
             for l in ls:
                 eng.add_erasure(l, erasers[l])
             try:
-                res["erase"][name] = score(eng, sets)
+                res["erase"][name] = score(eng, sets, f"erase {name}: score")
             finally:
                 eng.clear()
             print(f"erase {name}:", {k: v["acc"] for k, v in res["erase"][name].items()})
@@ -420,7 +425,7 @@ def main():
         for lam in (0.75, 0.5, 0.25, 0.0):
             eng.add_mlp_scale([27, 28, 29, 30], lam)
             try:
-                res["mlp"][str(lam)] = score(eng, sets)
+                res["mlp"][str(lam)] = score(eng, sets, f"MLP 27-30 x{lam}: score")
             finally:
                 eng.clear()
             print(f"MLP 27-30 x{lam}:", {k: v["acc"] for k, v in res["mlp"][str(lam)].items()})
