@@ -52,12 +52,14 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    p.add_argument("--only", default="readout,erase,mlp")
+    p.add_argument("--only", default="readout,erase,mlp",
+                   help="parts: readout, erase, mlp, readout_iid (in-distribution VLMBias-split readout test)")
     p.add_argument("--per-class", type=int, default=150, help="max training items per count class (probe)")
     p.add_argument("--heldout", type=int, default=600)
     p.add_argument("--vlmbias", type=int, default=1200, help="VLMBias counting items evaluated (true and familiar < 10)")
     p.add_argument("--controls", type=int, default=200, help="items per control set")
     p.add_argument("--erase-fit", type=int, default=1200)
+    p.add_argument("--iid-subjects", type=int, default=0, help="cap subjects for readout_iid (smoke tests); 0 = all")
     p.add_argument("--out", type=Path, default=None)
     return p.parse_args()
 
@@ -167,19 +169,19 @@ class Leace:
     """LEACE (Belrose et al. 2023): least-squares concept erasure. x' = x - W+ P W (x - mu), W = Sigma_xx^-1/2,
     P = projection onto the column space of W Sigma_xz."""
     def __init__(self, X, Z, dev):
-        X = X.astype(np.float64); Z = Z.astype(np.float64)
+        # on the GPU in float64: the CPU version (numpy eigh + 2560^3 products) took many minutes per layer on a 4-core box
+        X = torch.as_tensor(X, dtype=torch.float64, device=dev); Z = torch.as_tensor(Z, dtype=torch.float64, device=dev)
         mu = X.mean(0); Xc = X - mu; Zc = Z - Z.mean(0)
         S = Xc.T @ Xc / len(X)
-        ev, V = np.linalg.eigh(S)
-        ev = np.clip(ev, ev.max() * 1e-6, None)
+        ev, V = torch.linalg.eigh(S)
+        ev = ev.clamp(min=float(ev.max()) * 1e-6)
         W = (V * ev ** -0.5) @ V.T; Winv = (V * ev ** 0.5) @ V.T
         A = W @ (Xc.T @ Zc / len(X))
-        U, s, _ = np.linalg.svd(A, full_matrices=False)
-        U = U[:, s > s.max() * 1e-6]
-        P = U @ U.T
-        M = Winv @ P @ W
-        self.mu = torch.tensor(mu, dtype=torch.float32, device=dev)
-        self.M = torch.tensor(M, dtype=torch.float32, device=dev)
+        U, s_, _ = torch.linalg.svd(A, full_matrices=False)
+        U = U[:, s_ > float(s_.max()) * 1e-6]
+        M = Winv @ (U @ U.T) @ W
+        self.mu = mu.float()
+        self.M = M.float()
         self.rank = U.shape[1]
 
     def __call__(self, x):
@@ -276,6 +278,95 @@ def main():
               f"animals {r['vlmbias_animals']['acc']:.2f} {r['vlmbias_animals']['per_true_count']} | other {r['vlmbias_other']['acc']:.2f} | "
               f"originals {r['originals']['acc']:.2f}")
 
+    # ---- 1b. IN-DISTRIBUTION READOUT TEST (VLMBias-style images on both sides) ------------------------------------
+    # Train and test the answer-position count probe on VLMBias itself, split by SUBJECT (species / flag / logo /
+    # board: every resolution and question variant of one image stays on one side). Guards against the label
+    # distribution: within a topic the labels are few (animals: 3/5 edited, 4 original), so the probe could guess from
+    # topic + "looks edited". Baselines: majority label per (topic, edited?) on the training half; a probe trained on
+    # labels shuffled WITHIN (topic, edited?) groups (same category/label distribution, count information removed).
+    # Key measure: held-out edited animals, 3- vs 5-legged balanced accuracy (both edited, so only the count separates
+    # them); unedited originals must read their true count.
+    if "readout_iid" in only:
+        import re
+        def subject(item_id):
+            # "animals-legs-001-horse-notitle-q1-384", "animal_001_horse_notitle_Q1_px384", "animals-legs-001-horse-original-count-na"
+            m = re.match(r"([a-z]+?)s?[-_](?:[a-z]+[-_])?\d+[-_]([a-z0-9_]+?)[-_](?:notitle|original|withtitle)", item_id.lower())
+            if m:
+                return f"{m.group(1)}-{m.group(2)}"
+            return re.split(r"[-_](?:notitle|original|withtitle)", item_id.lower())[0]  # e.g. flag_stars_001
+        allv = [i for i, (gt, t) in enumerate(zip(ds["ground_truth"], ds["topic"])) if t != "Optical Illusion" and num(gt) is not None and num(gt) < 10]
+        items = [(subject(ds[i]["ID"]), Item(ds[i]["image"], ds[i]["prompt"], num(ds[i]["ground_truth"]),
+                  num(ds[i]["expected_bias"]), "count", ds[i]["topic"], "edited")) for i in allv]
+        items += [(subject(orig[k]["ID"]), Item(orig[k]["image"], orig[k]["prompt"], num(orig[k]["ground_truth"]), None, "count",
+                   orig[k]["topic"], "original")) for k in range(len(orig))
+                  if orig[k]["topic"] != "Optical Illusion" and num(orig[k]["ground_truth"]) is not None and num(orig[k]["ground_truth"]) < 10]
+        subs = sorted({s_ for s_, _ in items}); rng.shuffle(subs)
+        if args.iid_subjects:
+            subs = subs[: args.iid_subjects]; items = [(s_, it) for s_, it in items if s_ in set(subs)]
+        test_subs = set(subs[: len(subs) // 2])
+        tr = [it for s_, it in items if s_ not in test_subs]; te = [it for s_, it in items if s_ in test_subs]
+        print(f"in-distribution split: {len(subs)} subjects; train {len(tr)} items, test {len(te)} items")
+        Htr = np.stack([eng.answer(it, states=True)["ans_states"] for it in tqdm(tr, desc="iid: train states", unit="item")])
+        Hte = np.stack([eng.answer(it, states=True)["ans_states"] for it in tqdm(te, desc="iid: test states", unit="item")])
+        ytr, yte = np.array([it.truth for it in tr]), np.array([it.truth for it in te])
+        gtr = [(it.group, it.src) for it in tr]; gte = [(it.group, it.src) for it in te]
+        # baseline 1: majority label per (topic, edited/original) on the training half
+        maj = {g: Counter(y for gg, y in zip(gtr, ytr) if gg == g).most_common(1)[0][0] for g in set(gtr)}
+        base_pred = np.array([maj.get(g, Counter(ytr).most_common(1)[0][0]) for g in gte])
+        # baseline 2 labels: shuffled within (topic, edited/original)
+        y_shuf = ytr.copy()
+        for g in set(gtr):
+            idx = np.array([k for k, gg in enumerate(gtr) if gg == g]); y_shuf[idx] = rng.permutation(ytr[idx])
+        sel = {"edited animals": np.array([g == ("Animals", "edited") for g in gte]),
+               "unedited animals": np.array([g == ("Animals", "original") for g in gte]),
+               "edited other topics": np.array([g[1] == "edited" and g[0] != "Animals" for g in gte]),
+               "unedited other topics": np.array([g[1] == "original" and g[0] != "Animals" for g in gte])}
+        def summarize(pred):
+            out_ = {"all": float((pred == yte).mean())}
+            for k, m in sel.items():
+                if m.any():
+                    out_[k] = float((pred[m] == yte[m]).mean())
+            m = sel["edited animals"]
+            if m.any():  # 3 vs 5 balanced accuracy on edited animals
+                # needs BOTH classes: always answering 5 (75% of edited animals) must score 50%, not 100%
+                has_both = all((m & (yte == c)).any() for c in (3, 5))
+                out_["edited animals 3-vs-5 balanced"] = (float(np.mean([(pred[m & (yte == c)] == c).mean() for c in (3, 5)]))
+                                                         if has_both else None)
+                out_["edited animals n by truth"] = {c: int((m & (yte == c)).sum()) for c in (3, 5)}
+                out_["edited animals pred_hist"] = dict(Counter(int(x) for x in pred[m]))
+            return out_
+        rows = {}
+        for l in tqdm(list(range(4, L + 1, 2)), desc="iid probes", unit="layer"):
+            mu, sd = Htr[:, l].mean(0), Htr[:, l].std(0) + 1e-6
+            rows[l] = {"probe": summarize(TorchLogReg(R.dev).fit((Htr[:, l] - mu) / sd, ytr).predict((Hte[:, l] - mu) / sd)),
+                       "shuffled_within_topic": summarize(TorchLogReg(R.dev).fit((Htr[:, l] - mu) / sd, y_shuf).predict((Hte[:, l] - mu) / sd))}
+        res["readout_iid"] = {"n_subjects": len(subs), "n_train": len(tr), "n_test": len(te),
+                              "label_hist_train": {f"{g[0]}|{g[1]}": dict(Counter(int(y) for gg, y in zip(gtr, ytr) if gg == g)) for g in sorted(set(gtr))},
+                              "majority_baseline": summarize(base_pred), "model_answer": None, "by_layer": rows}
+        mod = np.array([eng.answer(it)["pred"] for it in tqdm(te, desc="iid: model answers", unit="item")])
+        res["readout_iid"]["model_answer"] = summarize(mod)
+        # layer chosen WITHOUT the test half: 2-fold cross-validation over training-half subjects
+        tr_subs = sorted({s_ for s_, it in items if s_ not in test_subs}); rng.shuffle(tr_subs)
+        fold = {s_: k % 2 for k, s_ in enumerate(tr_subs)}
+        tr_fold = np.array([fold[s_] for s_, it in items if s_ not in test_subs])
+        cv = {}
+        for l in rows:
+            scores = []
+            for f in (0, 1):
+                a_, b_ = tr_fold != f, tr_fold == f
+                mu, sd = Htr[a_, l].mean(0), Htr[a_, l].std(0) + 1e-6
+                pb = TorchLogReg(R.dev).fit((Htr[a_, l] - mu) / sd, ytr[a_]).predict((Htr[b_, l] - mu) / sd)
+                scores.append(float((pb == ytr[b_]).mean()))
+            cv[l] = float(np.mean(scores))
+        best = max(cv, key=cv.get)
+        res["readout_iid"]["cv_accuracy_by_layer"] = cv
+        res["readout_iid"]["chosen_layer"] = best
+        res["readout_iid"]["chosen_layer_note"] = "2-fold CV accuracy on the training-half subjects; the test half is not used"
+        print("iid majority baseline:", res["readout_iid"]["majority_baseline"])
+        print("iid model's own answer:", res["readout_iid"]["model_answer"])
+        print(f"iid layer {best} (chosen by CV on the training half): probe", rows[best]["probe"],
+              "| shuffled-within-topic", rows[best]["shuffled_within_topic"])
+
     # ---- 2. ERASE --------------------------------------------------------------------------------------------------
     if "erase" in only:
         fit = [it for it in local_items(data, "e1/conflict", rng, args.erase_fit // 2, roles={"counterfactual"})
@@ -296,7 +387,7 @@ def main():
         Z = np.concatenate(Zs); T = np.concatenate(Ts)
         erasers, checks = {}, {}
         n_fit = int(0.8 * len(Z))
-        for l in target_layers:
+        for l in tqdm(target_layers, desc="erase: fit erasers + checks", unit="layer"):
             X = np.concatenate(Xs[l])
             e = Leace(X[:n_fit], Z[:n_fit], R.dev)
             erasers[l] = e
@@ -334,9 +425,34 @@ def main():
                 eng.clear()
             print(f"MLP 27-30 x{lam}:", {k: v["acc"] for k, v in res["mlp"][str(lam)].items()})
 
-    (out / "interventions.json").write_text(json.dumps(res, indent=1, default=float))
-    figures(res, out)
+    name = "interventions.json" if only == {"readout", "erase", "mlp"} else f"interventions_{'_'.join(sorted(only))}.json"
+    (out / name).write_text(json.dumps(res, indent=1, default=float))
+    if name == "interventions.json":
+        figures(res, out)
+    else:
+        iid_figure(res, out)
     print(f"wrote {out}/index.html")
+
+
+def iid_figure(res, out):
+    if "readout_iid" not in res:
+        return
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    r = res["readout_iid"]; ls = sorted(int(l) for l in r["by_layer"])
+    g = lambda l: r["by_layer"][l] if l in r["by_layer"] else r["by_layer"][str(l)]
+    fig, axs = plt.subplots(1, 2, figsize=(14, 4.2), sharey=True)
+    for ax, key, title in ((axs[0], "edited animals 3-vs-5 balanced", "edited animals: 3 vs 5 legs (balanced accuracy)"),
+                           (axs[1], "unedited animals", "unedited animals: reads 4?")):
+        ax.plot(ls, [100 * (g(l)["probe"].get(key) or 0) for l in ls], "-o", color="#104281", label="count probe (VLMBias train half)")
+        ax.plot(ls, [100 * (g(l)["shuffled_within_topic"].get(key) or 0) for l in ls], ":", color="#a8a7a2", label="labels shuffled within topic")
+        for lab, v, c in (("majority label per topic", r["majority_baseline"].get(key), "#eb6834"), ("model's own answer", r["model_answer"].get(key), "#1baf7a")):
+            if v is not None:
+                ax.axhline(100 * v, color=c, ls="--", lw=1.2, label=lab)
+        ax.set_title(title, loc="left"); ax.set_xlabel("layer of the answer-position state"); ax.set_ylim(0, 105)
+    axs[0].set_ylabel("%"); axs[0].legend(frameon=False, fontsize=8)
+    fig.tight_layout(); fig.savefig(out / "readout_iid.png", dpi=130); plt.close(fig)
 
 
 def figures(res, out):

@@ -75,6 +75,7 @@ JOBS=(
   "probe part2-conflict-point-points-qwen3.5-s0-L16-31"
   "diagnose part2-conflict-point-points-qwen3.5-s0"
   "interventions base"
+  "interventions base readout_iid"
   "rl    base"
   "train part3-nonanimal-point points 0"
   "train part3-noleg-point     points 0"
@@ -247,10 +248,12 @@ for job in "${JOBS[@]}"; do
       [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
       NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
     fi
-    [[ -f "$DATA/reports/interventions/$NAME/interventions.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    OUTF=interventions.json; ONLY=()
+    if [[ -n "${B:-}" ]]; then OUTF="interventions_${B}.json"; ONLY=(--only "$B"); tag="$tag ($B)"; fi
+    [[ -f "$DATA/reports/interventions/$NAME/$OUTF" ]] && { STATUS+=("$tag: already done"); continue; }
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
-    uv run tools/interventions.py --data "$DATA" --model "$MODEL"; rc=$?
+    uv run tools/interventions.py --data "$DATA" --model "$MODEL" ${ONLY[@]+"${ONLY[@]}"}; rc=$?
   elif [[ "$KIND" == diagnose ]]; then
     tag="diagnose $A"
     MODEL=$(merged_of "$A")
