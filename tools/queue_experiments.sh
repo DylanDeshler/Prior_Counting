@@ -15,7 +15,10 @@
 #                                    model (plain and point-then-total prompts) and every trained arm lacking them
 #   prompt <model> <style>           prompt study: VLMBias main + original only; styles cot, debias, cot-debias,
 #                                    point-debias (answer_parsing.PROMPT_SUFFIXES), or think (thinking mode)
-#   rl <start>                       GRPO (tools/train_rl.sh): "base" = base + point-then-total prompt, or a run name
+#   rl <start> [arm]                 GRPO (tools/train_rl.sh): "base" = base + point-then-total prompt, or a run name;
+#                                    optional RL data arm (default part2-conflict-point)
+#   interventions <model>            inference-only fixes: mid-layer count readout, LEACE erasure of the familiar count,
+#                                    late-MLP scaling, with non-bias controls (tools/interventions.py)
 #   steer <model>                    activation steering along a "true count vs familiar" direction (tools/steer_count.py)
 #   train <arm> <format> <seed> late LoRA on language-model layers 16-31 only (run name gets -L16-31)
 #   diagnose <run>                   per-item diagnosis, untrained vs <run> on items the untrained model gets wrong and
@@ -71,7 +74,12 @@ JOBS=(
   "train part2-conflict-point points 0 late"
   "probe part2-conflict-point-points-qwen3.5-s0-L16-31"
   "diagnose part2-conflict-point-points-qwen3.5-s0"
+  "interventions base"
   "rl    base"
+  "train part3-nonanimal-point points 0"
+  "train part3-noleg-point     points 0"
+  "train part3-all-point       points 0"
+  "rl    base part3-nonanimal-point"
   "steer base"
   "steer part2-conflict-point-points-qwen3.5-s0"
   "train real-mixed      mixed  0"
@@ -134,10 +142,16 @@ if [[ -f "$DATA/tests/P/conflict/records.jsonl" && ! -f "$DATA/parts/conflict_v2
   step "build the v2 leg edit pairs (CPU only)"
   uv run python -m datagen --data "$DATA" build parts2 || echo "WARNING: v2 leg pairs failed; part2- jobs will be skipped"
 fi
+# v3 part pairs (wheels, wings, arms, ears, horns; parts.build_v3): CPU only.
+if [[ -f "$DATA/tests/P/conflict/records.jsonl" && ! -f "$DATA/parts3/conflict/records.jsonl" ]]; then
+  step "build the v3 part pairs (non-leg parts; CPU only)"
+  uv run python -m datagen --data "$DATA" build parts3 || echo "WARNING: v3 part pairs failed; part3- jobs will be skipped"
+fi
 # Re-export when an export layout changed (fast; train files of existing arms stay byte-identical):
 # the held-out real-photo validation set (real/val, the validation loss of every arm) and real-only arms.
 if [[ ! -f "$DATA/real/val/records.jsonl" || ! -f "$DATA/exports/conflict-mixed/qwen3.5/mixed/train.jsonl" \
       || ( -f "$DATA/parts/conflict_v2/records.jsonl" && ! -f "$DATA/exports/part2-conflict-point/qwen3.5/points/train.jsonl" ) \
+      || ( -f "$DATA/parts3/conflict/records.jsonl" && ! -f "$DATA/exports/part3-nonanimal-point/qwen3.5/points/train.jsonl" ) \
       || ( -f "$DATA/exports/part-conflict-point/qwen3.5/points/train_rl.jsonl" \
            && ! $(head -c 4000 "$DATA/exports/part-conflict-point/qwen3.5/points/train_rl.jsonl" | grep -c unit_size) -gt 0 ) ]]; then
   step "export training data"
@@ -202,6 +216,7 @@ for job in "${JOBS[@]}"; do
   elif [[ "$KIND" == rl ]]; then
     tag="rl $A"
     if [[ "$A" == base ]]; then R=base-pointT-grpo; T=+pointT
+      [[ -n "${B:-}" && "$B" != part2-conflict-point ]] && R="$R-$B"
     else
       [[ -n "$(merged_of "$A")" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
       R="$A-grpo"; T=""
@@ -211,7 +226,7 @@ for job in "${JOBS[@]}"; do
       STATUS+=("$tag: already done"); continue
     fi
     step "$tag"
-    tools/train_rl.sh "$DATA" "$A"; rc=$?
+    tools/train_rl.sh "$DATA" "$A" ${B:+"$B"}; rc=$?
   elif [[ "$KIND" == probe ]]; then
     tag="probe $A"
     if [[ "$A" == base ]]; then MODEL=$BASE NAME=Qwen3.5-4B
@@ -224,6 +239,18 @@ for job in "${JOBS[@]}"; do
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
     uv run tools/probe_vision.py --data "$DATA" --model "$MODEL"; rc=$?
+  elif [[ "$KIND" == interventions ]]; then
+    tag="interventions $A"
+    if [[ "$A" == base ]]; then MODEL=$BASE NAME=Qwen3.5-4B
+    else
+      MODEL=$(merged_of "$A")
+      [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+      NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
+    fi
+    [[ -f "$DATA/reports/interventions/$NAME/interventions.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    step "$tag"
+    wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
+    uv run tools/interventions.py --data "$DATA" --model "$MODEL"; rc=$?
   elif [[ "$KIND" == diagnose ]]; then
     tag="diagnose $A"
     MODEL=$(merged_of "$A")

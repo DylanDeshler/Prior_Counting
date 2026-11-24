@@ -19,7 +19,7 @@ the image (OpenCV inpainting is deterministic).
 
 import json
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 import cv2
@@ -36,7 +36,14 @@ POOLS = {("count", "train"): ("parts/count", "parts_count"), ("count", "test"): 
          ("conflict", "test"): ("tests/P/conflict", "parts_conflict_test")}
 QUESTIONS = {"how_many": "How many legs of the {name} can you see? Answer with a number in curly brackets, e.g., {{9}}.",
              "count_the": "Count the visible legs of the {name}. Answer with a number in curly brackets, e.g., {{9}}."}
-NAMES = {"cat": "cat", "dog": "dog", "cow": "cow", "sheep": "sheep", "horse": "horse", "bird": "bird"}
+NAMES = {"cat": "cat", "dog": "dog", "cow": "cow", "sheep": "sheep", "horse": "horse", "bird": "bird", "bicycle": "bicycle",
+         "motorbike": "motorbike", "car": "car", "person": "person"}
+PLURAL = {"leg": "legs", "wheel": "wheels", "wing": "wings", "ear": "ears", "arm": "arms", "horn": "horns", "eye": "eyes"}
+# v3 (2026-11-24): other part types, for training on parts that are NOT animal legs and testing on legs (held out).
+NON_LEG_TASKS = [("bicycle", "wheel"), ("motorbike", "wheel"), ("car", "wheel"), ("bird", "wing"), ("person", "arm"),
+                 ("cat", "ear"), ("dog", "ear"), ("horse", "ear"), ("cow", "ear"), ("sheep", "ear"), ("cow", "horn")]
+NON_ANIMAL_CLASSES = ("bicycle", "motorbike", "car", "person")
+MAX_PER_TASK = 400  # candidates per (class, part) so arms and ears don't swamp wheels
 MARGIN = 1.15             # crop side = 1.15 x the animal's longer bbox side
 MIN_LEG_PX = 150          # every visible leg >= 150 px of mask at 448 px (count pool; unit size >= 12 px rule)
 MIN_EDIT_LEG_PX = 250     # legs used in edit pairs: larger, so the edit is clearly visible
@@ -213,8 +220,13 @@ def plan_null(kind, legs, obj_mask, crop, rng, edit):
 # Candidates
 # ---------------------------------------------------------------------------
 
-def candidates():
-    """Animals usable for leg counting, from part-annotated objects. Light: no masks kept."""
+def candidates(tasks=None):
+    """Objects usable for part counting (default: animal legs), from part-annotated objects. Light: no masks kept.
+    tasks: [(class, part)]; a candidate is one object and one part type."""
+    tasks = tasks or [(c, "leg") for c in pp.ANIMALS]
+    by_class = defaultdict(list)
+    for cls, unit in tasks:
+        by_class[cls].append(unit)
     out = []
     for iid in tqdm(pp.image_ids(), desc="Pascal-Part candidates", unit="img"):
         if not (pp.IMAGES / f"{iid}.jpg").exists():
@@ -222,26 +234,41 @@ def candidates():
         objs = pp.load(iid)
         h, w = objs[0]["mask"].shape if objs else (0, 0)
         for k, o in enumerate(objs):
-            if o["class"] not in pp.ANIMALS or not o["has_parts"]:
+            if o["class"] not in by_class or not o["has_parts"]:
                 continue
-            legs = list(o["units"]["leg"].values())
-            if not legs:
-                continue
-            crop = square_crop(o["bbox"], w, h)
-            scale = IMG / crop[2]
-            if o["mask"].sum() * scale ** 2 < MIN_OBJ_FRAC * IMG * IMG or min(in_crop_frac(m, crop) for m in legs) < 0.98:
-                continue
-            if any(j != k and p["class"] == o["class"] and box_overlap_frac(p["bbox"], crop) > MAX_OTHER_OVERLAP
-                   for j, p in enumerate(objs)):
-                continue
-            areas = [m.sum() * scale ** 2 for m in legs]
-            if min(areas) < MIN_LEG_PX:
-                continue
-            canon = pp.UNITS[o["class"]]["leg"][0]
-            out.append({"image_id": iid, "obj": k, "class": o["class"], "count": len(legs), "canonical": canon,
-                        "crop": crop, "edit_ok": bool(len(legs) == canon and min(areas) >= MIN_EDIT_LEG_PX),
-                        "split": pp.split_of(iid)})
+            for unit in by_class[o["class"]]:
+                c = candidate(objs, k, o, unit, iid, w, h)
+                if c:
+                    out.append(c)
+    if any(u != "leg" for _, u in tasks):  # cap per task (v3); the v1/v2 leg pools are unchanged
+        rng = np.random.default_rng(0)
+        capped = []
+        for cls, unit in tasks:
+            cs = [c for c in out if c["class"] == cls and c["unit"] == unit]
+            rng.shuffle(cs)
+            capped += cs[:MAX_PER_TASK]
+        out = capped
     return out
+
+
+def candidate(objs, k, o, unit, iid, w, h):
+    legs = list(o["units"].get(unit, {}).values())
+    if not legs:
+        return None
+    crop = square_crop(o["bbox"], w, h)
+    scale = IMG / crop[2]
+    if o["mask"].sum() * scale ** 2 < MIN_OBJ_FRAC * IMG * IMG or min(in_crop_frac(m, crop) for m in legs) < 0.98:
+        return None
+    if any(j != k and p["class"] == o["class"] and box_overlap_frac(p["bbox"], crop) > MAX_OTHER_OVERLAP for j, p in enumerate(objs)):
+        return None
+    areas = [m.sum() * scale ** 2 for m in legs]
+    if min(areas) < MIN_LEG_PX:
+        return None
+    canon = pp.UNITS[o["class"]][unit][0]
+    # cars rarely show all 4 wheels: edit any car with >= 2 visible (those pairs get no familiar answer)
+    full = len(legs) == canon or (o["class"] == "car" and unit == "wheel" and len(legs) >= 2)
+    return {"image_id": iid, "obj": k, "class": o["class"], "unit": unit, "count": len(legs), "canonical": canon,
+            "crop": crop, "edit_ok": bool(full and min(areas) >= MIN_EDIT_LEG_PX), "split": pp.split_of(iid)}
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +283,8 @@ def render(rec):
     """Regenerate a record's image from its stored parameters (also used by the builder)."""
     p = rec["render"]["params"]
     o = pp.load(p["image_id"])[p["obj"]]
-    legs = [o["units"]["leg"][k] for k in sorted(o["units"]["leg"])]
+    unit_ = p.get("unit", "leg")
+    legs = [o["units"][unit_][k] for k in sorted(o["units"][unit_])]
     img = _load_img(p["image_id"])
     if p.get("edit"):
         img, legs = apply_edit(img, legs, p["edit"])
@@ -267,19 +295,21 @@ def render(rec):
 
 def make_record(c, dataset, out, idx, role, edit, compression, pair_id, familiar, delta, template):
     name = NAMES[c["class"]]
+    unit = c.get("unit", "leg")
     suffix = {"neutral": "neu", "canonical": "can", "counterfactual": "cf"}[role]
-    rid = f"{dataset.replace('_', '-')}-{c['class']}-{idx:06d}-{suffix}"
+    rid = f"{dataset.replace('_', '-')}-{c['class']}{'' if unit == 'leg' else '-' + unit}-{idx:06d}-{suffix}"
     return {
         "id": rid, "pair_id": pair_id, "dataset": dataset, "pool_index": idx, "level": "L2", "prior": "count",
-        "data_type": "neutral" if role == "neutral" else "conflict", "role": role, "family": c["class"], "unit": "leg",
-        "label": "leg", "image": f"{out}/images/{rid}.png", "question_template": template,
-        "question": QUESTIONS[template].format(name=name), "answer": None, "familiar_answer": familiar, "delta": delta,
+        "data_type": "neutral" if role == "neutral" else "conflict", "role": role, "family": c["class"], "unit": unit,
+        "label": unit, "image": f"{out}/images/{rid}.png", "question_template": template,
+        "question": QUESTIONS[template].format(name=name).replace("legs", PLURAL[unit]), "answer": None, "familiar_answer": familiar, "delta": delta,
         "points": None, "masks_rle": None, "unit_size_px": None, "object_bbox": None,
         "edit": {"op": (edit or {}).get("op", "none"), "params": edit or {}, "null_edit": bool(edit and edit["op"].startswith("null"))},
         "source": {"dataset": "pascal_part_voc2010", "image_id": c["image_id"], "ann_ids": [c["obj"]],
                    "license": "PASCAL VOC (Flickr terms); Pascal-Part annotations (Chen et al. 2014)"},
         "render": {"generator": "pascal_part", "params": {"image_id": c["image_id"], "obj": c["obj"], "crop": c["crop"],
-                                                           "edit": edit, "inpaint": list(INPAINT)}},
+                                                           "edit": edit, "inpaint": list(INPAINT),
+                                                           **({"unit": unit} if unit != "leg" else {})}},
         "compression": compression, "seed": item_seed(dataset, c["class"], idx), "attempt": 0,
         "generator_version": GENERATOR_VERSION,
         "checks": {"independent_recount": None, "sam3_count": None, "ocr_count": None, "polygon_sides": None,
@@ -329,7 +359,7 @@ def pair_job(args):
     opts = rest[0] if rest else {}
     rng = rng_for(item_seed(dataset, c["class"], idx))
     o = pp.load(c["image_id"])[c["obj"]]
-    legs = [o["units"]["leg"][k] for k in sorted(o["units"]["leg"])]
+    legs = [o["units"][c.get("unit", "leg")][k] for k in sorted(o["units"][c.get("unit", "leg")])]
     others = np.zeros_like(o["mask"])
     for j, p in enumerate(pp.load(c["image_id"])):
         if j != c["obj"]:
@@ -347,8 +377,10 @@ def pair_job(args):
     template = ("how_many", "count_the")[idx % 2]
     pid = f"{dataset.replace('_', '-')}-{c['class']}-{idx:06d}"
     delta = 1 if edit["op"] == "add" else -1
-    recs = [make_record(c, dataset, out, idx, "canonical", null, comp, pid, c["canonical"], 0, template),
-            make_record(c, dataset, out, idx, "counterfactual", edit, comp, pid, c["canonical"], delta, template)]
+    base = c["count"]  # == canonical, except cars with 2-3 visible wheels (no familiar answer for those)
+    fam = c["canonical"] if base == c["canonical"] else None
+    recs = [make_record(c, dataset, out, idx, "canonical", null, comp, pid, fam, 0, template),
+            make_record(c, dataset, out, idx, "counterfactual", edit, comp, pid, fam, delta, template)]
     if opts.get("anchor"):
         for r in recs:
             r["render"]["params"]["anchor"] = opts["anchor"]
@@ -357,7 +389,7 @@ def pair_job(args):
     except Exception as e:
         return [], str(e)[:80]
     can, cf = recs
-    if can["answer"] != c["canonical"] or cf["answer"] != c["canonical"] + delta:
+    if can["answer"] != base or cf["answer"] != base + delta:
         return [], f"count check failed ({can['answer']}, {cf['answer']})"
     # the edit must actually change pixels where it says it does
     a, b = (np.asarray(Image.open(DATA / r["image"]).convert("L"), np.int16) for r in recs)
@@ -397,6 +429,32 @@ def build(limit=None):
     report["seconds"] = round(time.time() - t, 1)
     REPORTS.mkdir(parents=True, exist_ok=True)
     (REPORTS / "build_parts.json").write_text(json.dumps(report, indent=1, default=dict))
+    return report
+
+
+V3_POOLS = {"train": ("parts3/conflict", "parts3_conflict"), "test": ("tests/P3/conflict", "parts3_conflict_test")}
+
+
+def build_v3(limit=None):
+    """Edit pairs for part types other than animal legs (wheels, wings, arms, ears, horns; NON_LEG_TASKS), same recipe as
+    v2 (two add pairs and one remove pair per object, wide add search). Training arms built from it hold animal legs out
+    entirely, so VLMBias animals and tests/P become held-out-part tests."""
+    t = time.time()
+    cands = [c for c in candidates(NON_LEG_TASKS) if c["edit_ok"]]
+    report = {"candidates_by_task": dict(Counter(f"{c['class']}:{c['unit']}" for c in cands))}
+    for split, (out, dataset) in V3_POOLS.items():
+        pool = [c for c in cands if c["split"] == split]
+        jobs = [(c, dataset, out, i, {"kinds": (V2_SCHEDULE[i % 3],), "wide": True})
+                for i, c in enumerate(c for c in pool for _ in V2_SCHEDULE)][:limit]
+        recs, dropped = run(pair_job, jobs, dataset)
+        write_jsonl(DATA / out / "records.jsonl", recs)
+        report[dataset] = {"jobs": len(jobs), "records": len(recs), "dropped": dict(dropped),
+                           "by_task": dict(Counter(f"{r['family']}:{r['unit']}" for r in recs)),
+                           "answers": dict(sorted(Counter(r["answer"] for r in recs).items())),
+                           "edits": dict(Counter(r["edit"]["op"] for r in recs))}
+        print(f"{out}: {len(recs)} images; by task {report[dataset]['by_task']}; dropped {dict(dropped)}")
+    report["seconds"] = round(time.time() - t, 1)
+    (REPORTS / "build_parts_v3.json").write_text(json.dumps(report, indent=1, default=dict))
     return report
 
 

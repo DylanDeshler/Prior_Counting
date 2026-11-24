@@ -496,7 +496,10 @@ def item_card(c, full, L, path):
     import matplotlib.pyplot as plt
     ctx, cb = c["ctx"], c["cb"]
     img = c["image"].convert("RGB").resize((IMG, IMG))
-    early, late = 0, len(full) - 1
+    early = 0
+    # late overlay: the second-half standard-attention layer that attends to the image most (layer 31 attends ~8%)
+    half = len(full) // 2
+    late = max(range(half, len(full)), key=lambda li: cb["att"][li].mean(0)[ctx.groups["image"]].sum())
     fig = plt.figure(figsize=(16, 4.2))
     gsp = fig.add_gridspec(1, 4, width_ratios=[1, 1, 1.5, 1.6])
     for j, (li, title) in enumerate(((early, "early"), (late, "late"))):

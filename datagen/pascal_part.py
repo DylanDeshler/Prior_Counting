@@ -59,7 +59,7 @@ ANIMALS = ("cat", "dog", "cow", "sheep", "horse", "bird")  # leg counting for th
 # Sources
 # ---------------------------------------------------------------------------
 
-def fetch(refresh=False):
+def fetch(refresh=False, max_images=None):
     """Annotations (~80 MB) and the VOC 2010 trainval images that have part annotations (~1.3 GB tar)."""
     from .coco import _download
     DIR.mkdir(parents=True, exist_ok=True)
@@ -80,6 +80,9 @@ def fetch(refresh=False):
                             name = m.name.rsplit("/", 1)[-1]
                             if "/JPEGImages/" in m.name and name[:-4] in wanted - have:
                                 (IMAGES / name).write_bytes(t.extractfile(m).read())
+                                have.add(name[:-4])
+                                if max_images and len(have) >= max_images:  # dev/smoke tests: a sample only
+                                    break
                 break
             except Exception as e:  # try the mirror
                 print(f"VOC download from {url} failed: {e}")

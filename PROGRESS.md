@@ -145,7 +145,7 @@ descriptive names. §3.1 onward is the chronological log (run ids, details, corr
     answer position by layer ~16, and the last layers overwrite it with the familiar count.
 11. *One steering direction fixes it.* No effect at <= 0.2x the state norm; a 0.1x-10x sweep (plus reversed) is
     queued after RL from the pointing prompt.
-12. *Queued next (before RL):* per-item diagnosis (`tools/diagnose_items.py`) on ~30 animal + ~30 other-topic
+12. *Per-item diagnosis (built 2026-11-23):* per-item diagnosis (`tools/diagnose_items.py`) on ~30 animal + ~30 other-topic
     items the untrained model gets wrong and the leg-trained model gets right (same tokens): attention from the
     answer to image tokens vs the question's subject words on the 8 standard-attention layers (Qwen3.5 is
     single-stream; the other 24 layers are linear attention with no attention matrix), knockouts of those routes,
@@ -156,6 +156,41 @@ descriptive names. §3.1 onward is the chronological log (run ids, details, corr
     the blocks pushing hardest toward the familiar count, chosen on half the items; check the other half and the
     originals). Output: reports/diagnose/<model>/index.html with captioned figures and per-item cards. Tests the
     hypothesis "early layers look at the image, the late layers that overwrite the count look at the subject words".
+13. *Mixed point/number training distills pointing into direct answers (H3c).* Rejected: direct answers stay at
+    number-training level (synthetic: animals 11% vs 13% for numbers; real objects 22% vs 15%); the synthetic mixed
+    model with the pointing prompt reaches 34.9 (animals 54.4), still below the untrained pointing prompt (39.0).
+14. *Conflict pairs matter (vs neutral images), synthetic, point lists.* No: neutral images do as well on VLMBias
+    (32.1 vs 28.4; animals 49.5 vs 40.5; other 25.6 vs 23.9); originals 65.0 vs 72.4.
+15. *Late layers read the subject words to recall the prior* (per-item diagnosis, 30 animal + 30 other items,
+    untrained vs leg edits v2 point lists, forced direct answer). Rejected: subject-word attention peaks mid-depth
+    (12-15% at layers 15-19) and is ~2% late, where the chat template dominates; image attention peaks at 34-38%
+    (layers 19-23). Attention knockouts move the preference by <= ~1 logit (vs -5.8). The familiar count is written by
+    the MLPs of layers 27-30 (attribution -2.7 / -2.0 / -1.2 for 28 / 29 / 30), identically for the edited image and
+    its unedited original (-5.8 vs -6.6). Patching: the trained model's fix is in the text-position states from the
+    middle layers (50% of the gap by layer 14, 90% by 19), not in the image tokens (~0). Word swap "this animal" ->
+    "this object": +2.4 logits toward the true count, 0 flips. Ablating the top-10 familiar-count blocks flips 13% of
+    held-out animal items (40% of other topics) with originals intact: the prior is spread across many late MLPs.
+16. *One steering direction makes the model count* (round 2: 0.1x-10x the state norm + reversed, every text
+    position). Rejected: <= 0.3x no effect; ~1x removes the familiar answer (animals: familiar 97 -> 2-61%) but the
+    true count barely appears (<= 26%) and originals fall 91 -> 25-54%; >= 3x the model stops answering with a number.
+    Steering the leg-trained model makes it worse in both directions.
+17. *RL from the pointing prompt*: failed at startup (ms-swift GRPO needs `msgspec`, not in the SFT install);
+    `tools/train_rl.sh` now installs it. Reruns when the queue is restarted.
+18. *Queued next (2026-11-24), all aimed at the diagnosed mechanism or at the "only its own category" problem:*
+    - `tools/interventions.py` (inference only, untrained model, forced direct answers): (1) answer from a mid-layer
+      count probe at the answer position (class-balanced over counts 0-9 from leg edits, natural legs, synthetic
+      families; held-out per-count accuracy and a shuffled-label control; layer chosen on held-out non-VLMBias data;
+      shortcut checks: 3- and 5-legged animals separately, and the unedited originals must read 4); (2) LEACE erasure
+      of the familiar count (fit on counterfactuals so familiar != true; checks that the familiar count becomes
+      undecodable while the true count stays decodable) at layer 12/16/20/24 or all four; (3) scaling the MLPs of
+      layers 27-30 by 0.75-0. Every condition is scored on VLMBias, the originals, and non-bias controls (synthetic
+      canonicals, real-photo counting, visible legs, color questions).
+    - v3 part data (`parts.build_v3`, CPU): edit pairs for wheels (bicycle, motorbike, car), bird wings, person arms,
+      ears, horns; arms `part3-nonanimal-point` (no animals at all), `part3-noleg-point` (no legs), `part3-all-point`.
+      Animal legs are held out, so VLMBias animals and tests/P test transfer to an unseen part.
+    - RL from the pointing prompt on the v3 non-animal data (`rl base part3-nonanimal-point`): does RL generalize to a
+      held-out category where training on that category's own data was needed before?
+
 
 Baseline for every comparison: the untrained model with the pointing prompt. "Other topics" = VLMBias
 without the animal topic (the leg data trains on animals, so this is the transfer measure).

@@ -21,8 +21,14 @@ ARMS=("$@"); (( ${#ARMS[@]} )) || ARMS=(part2-conflict-point)
 cd "$(dirname "$0")/.."
 source tools/common.sh
 if [[ "$START" == base ]]; then RUN="runs/base-pointT-grpo"; STYLE=point-total; else RUN="runs/${START}-grpo"; STYLE=default; fi
+# a non-default RL data set gets its own run (e.g. runs/base-pointT-grpo-part3-nonanimal-point: legs held out)
+[[ "${ARMS[*]}" != "part2-conflict-point" ]] && RUN="$RUN-$(IFS=+; echo "${ARMS[*]}")"
 SWIFT_ENV=${SWIFT_ENV:-.venv-swift}
 [[ -x "$SWIFT_ENV/bin/swift" ]] || { echo "missing $SWIFT_ENV (run tools/train_arm.sh once to create it)"; exit 1; }
+# GRPO needs packages the SFT install doesn't pull in (first failure: ModuleNotFoundError: msgspec).
+for pkg in msgspec; do
+  "$SWIFT_ENV/bin/python" -c "import $pkg" 2>/dev/null || uv pip install --python "$SWIFT_ENV/bin/python" "$pkg"
+done
 export PYTHONNOUSERSITE=1 TRITON_DEFAULT_FP_FUSION=1
 SWIFT=("$SWIFT_ENV/bin/swift")
 

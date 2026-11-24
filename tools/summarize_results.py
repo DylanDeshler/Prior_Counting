@@ -27,7 +27,9 @@ from pathlib import Path
 
 
 # Descriptive names for shared tables (run ids stay in parentheses for cross-reference).
-DATASETS = [("part2-conflict", "animal-leg edits v2"), ("part-conflict", "animal-leg edits v1"), ("part-neutral", "natural animal legs"),
+DATASETS = [("part3-nonanimal", "non-animal parts (wheels, arms; animals held out)"),
+            ("part3-noleg", "parts other than legs (wheels, wings, arms, ears, horns; legs held out)"),
+            ("part3-all", "all parts incl. animal legs"), ("part2-conflict", "animal-leg edits v2"), ("part-conflict", "animal-leg edits v1"), ("part-neutral", "natural animal legs"),
             ("real-", "real-photo objects (LVIS)"), ("conflict-blind", "synthetic pairs, images grayed (control)"),
             ("conflict-", "synthetic conflict pairs"), ("neutral-", "synthetic neutral images"), ("dice-only", "synthetic dice only")]
 FORMATS = {"number": "numbers", "points": "point lists", "mixed": "half point lists, half numbers", "list": "item lists", "count": "numbers",
@@ -45,6 +47,10 @@ def display(model):
             break
     if base.startswith("Qwen3.5-4B"):
         label = "No training, " + (prompt or "plain prompt")
+    elif base.startswith("base-pointT-grpo"):
+        rest = base[len("base-pointT-grpo"):].split("-ckpt")[0].lstrip("-")
+        data = next((v for k, v in DATASETS if rest.startswith(k)), "animal-leg edits v2") if rest else "animal-leg edits v2"
+        label = f"RL (GRPO) from the pointing prompt, on {data}" + (f"; {prompt}" if prompt else "")
     else:
         data = next((v for k, v in DATASETS if base.startswith(k)), base.split("-qwen")[0])
         fmt = next((v for k, v in FORMATS.items() if f"-{k}-qwen" in base), "")

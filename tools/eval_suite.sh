@@ -19,5 +19,6 @@ EVAL=(uv run run_vlms_are_biased.py --model "$MODEL" --max-new-tokens "$CAP" --o
 [[ -d "$DATA/tests/R/count" ]] && "${EVAL[@]}" --records "$DATA/tests/R/count"     # real-photo counting with points (held out)
 [[ -d "$DATA/tests/P/count" ]] && "${EVAL[@]}" --records "$DATA/tests/P/count"     # real-photo part counting: visible legs (held out)
 [[ -d "$DATA/tests/P/conflict" ]] && "${EVAL[@]}" --records "$DATA/tests/P/conflict"   # real-photo leg edit pairs (held out)
+[[ -d "$DATA/tests/P3/conflict" ]] && "${EVAL[@]}" --records "$DATA/tests/P3/conflict" # non-leg part edit pairs (wheels, wings, arms, ears; held out)
 "${EVAL[@]}" --records "$DATA/e1/val_conflict" "$DATA/e1/val_shared"              # in-distribution (Gate 2)
 uv run tools/summarize_results.py results
