@@ -18,6 +18,9 @@
 #   rl <start>                       GRPO (tools/train_rl.sh): "base" = base + point-then-total prompt, or a run name
 #   steer <model>                    activation steering along a "true count vs familiar" direction (tools/steer_count.py)
 #   train <arm> <format> <seed> late LoRA on language-model layers 16-31 only (run name gets -L16-31)
+#   diagnose <run>                   per-item diagnosis, untrained vs <run> on items the untrained model gets wrong and
+#                                    <run> gets right: attention to image vs subject words, knockouts, logit
+#                                    attribution, activation patching (tools/diagnose_items.py)
 #   probe <model>                    interpretability (tools/probe_vision.py): leg probe on image tokens, added-leg
 #                                    scores, logit lens, saliency; <model> is "base" or a run name
 #   sweep <run>                      overfitting check: accuracy at 25/50/75/100% of training on held-out real
@@ -67,6 +70,7 @@ JOBS=(
   "probe part2-conflict-point-points-qwen3.5-s0"
   "train part2-conflict-point points 0 late"
   "probe part2-conflict-point-points-qwen3.5-s0-L16-31"
+  "diagnose part2-conflict-point-points-qwen3.5-s0"
   "rl    base"
   "steer base"
   "steer part2-conflict-point-points-qwen3.5-s0"
@@ -220,6 +224,15 @@ for job in "${JOBS[@]}"; do
     step "$tag"
     wait_for_gpu 16 || { STATUS+=("$tag: GPU busy"); continue; }
     uv run tools/probe_vision.py --data "$DATA" --model "$MODEL"; rc=$?
+  elif [[ "$KIND" == diagnose ]]; then
+    tag="diagnose $A"
+    MODEL=$(merged_of "$A")
+    [[ -n "$MODEL" ]] || { STATUS+=("$tag: skipped ($A not trained yet)"); continue; }
+    NAME="$A-$(basename "$MODEL" | sed 's/checkpoint-/ckpt/')"
+    [[ -f "$DATA/reports/diagnose/$NAME/diagnose.json" ]] && { STATUS+=("$tag: already done"); continue; }
+    step "$tag"
+    wait_for_gpu 24 || { STATUS+=("$tag: GPU busy"); continue; }   # two 4B models in memory
+    uv run tools/diagnose_items.py --data "$DATA" --clean "$MODEL"; rc=$?
   elif [[ "$KIND" == steer ]]; then
     tag="steer $A"
     if [[ "$A" == base ]]; then MODEL=$BASE NAME=Qwen3.5-4B

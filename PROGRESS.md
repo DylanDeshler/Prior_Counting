@@ -145,6 +145,17 @@ descriptive names. §3.1 onward is the chronological log (run ids, details, corr
     answer position by layer ~16, and the last layers overwrite it with the familiar count.
 11. *One steering direction fixes it.* No effect at <= 0.2x the state norm; a 0.1x-10x sweep (plus reversed) is
     queued after RL from the pointing prompt.
+12. *Queued next (before RL):* per-item diagnosis (`tools/diagnose_items.py`) on ~30 animal + ~30 other-topic
+    items the untrained model gets wrong and the leg-trained model gets right (same tokens): attention from the
+    answer to image tokens vs the question's subject words on the 8 standard-attention layers (Qwen3.5 is
+    single-stream; the other 24 layers are linear attention with no attention matrix), knockouts of those routes,
+    direct logit attribution per layer (checked: sums match the logit gap) and its running total, and activation
+    patching trained -> untrained per layer at answer / image / text positions. Plus: edited image vs its unedited
+    original (72 of 91 VLMBias animal species have one; running preference for both and how different the answer
+    states are, layer by layer), a subject-word swap ("this animal" -> "this object"), and an ablation test (zero
+    the blocks pushing hardest toward the familiar count, chosen on half the items; check the other half and the
+    originals). Output: reports/diagnose/<model>/index.html with captioned figures and per-item cards. Tests the
+    hypothesis "early layers look at the image, the late layers that overwrite the count look at the subject words".
 
 Baseline for every comparison: the untrained model with the pointing prompt. "Other topics" = VLMBias
 without the animal topic (the leg data trains on animals, so this is the transfer measure).

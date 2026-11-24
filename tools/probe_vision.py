@@ -68,12 +68,13 @@ def read_jsonl(path):
 
 
 class Runner:
-    def __init__(self, model_id):
+    def __init__(self, model_id, attn_implementation=None):
         from transformers import AutoModelForImageTextToText, AutoProcessor
         dev = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
         self.dev = dev
+        kw = {"attn_implementation": attn_implementation} if attn_implementation else {}  # "eager" returns attention weights
         self.model = AutoModelForImageTextToText.from_pretrained(
-            model_id, dtype=torch.bfloat16 if dev != "cpu" else torch.float32, device_map=dev).eval()
+            model_id, dtype=torch.bfloat16 if dev != "cpu" else torch.float32, device_map=dev, **kw).eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.proc = AutoProcessor.from_pretrained(model_id)
